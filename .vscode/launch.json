@@ -1,0 +1,28 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Streamlit app",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "streamlit",
+      "args": ["run", "share_recommender/ui/app.py"],
+      "envFile": "${workspaceFolder}/.env"
+    },
+    {
+      "name": "FastAPI (uvicorn --reload)",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "uvicorn",
+      "args": ["share_recommender.api.main:app", "--reload"],
+      "envFile": "${workspaceFolder}/.env"
+    },
+    {
+      "name": "Tests",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "pytest",
+      "args": ["-q"]
+    }
+  ]
+}
