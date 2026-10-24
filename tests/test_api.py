@@ -56,3 +56,25 @@ def test_quote(client):
     assert client.get("/quotes/ASX/VAS").json()["price"] == "100"
     assert client.get("/quotes/ASX/XYZ").status_code == 404
     assert client.get("/quotes/MOON/VAS").status_code == 404
+
+
+def test_preferences_and_recommendation(client):
+    cat_id = client.get("/categories").json()[0]["id"]
+    assert client.get("/preferences").status_code == 404
+    assert client.get(f"/categories/{cat_id}/recommendation").status_code == 409
+
+    prefs = {"markets": ["asx"], "direct_shares": "etf_only", "brokerage_per_trade": "5"}
+    saved = client.put("/preferences", json=prefs)
+    assert saved.status_code == 200 and saved.json()["markets"] == ["ASX"]
+    assert client.put(f"/categories/{cat_id}/preferences",
+                      json={"horizon_years": 15, "flexibility": "must_meet"}).status_code == 200
+
+    rec = client.get(f"/categories/{cat_id}/recommendation", params={"amount": "5000"}).json()
+    assert rec["mix"]["growth_pct"] == 60
+    assert rec["mix"]["picks"][0]["ticker"] == "VAS"
+    assert rec["buy_plan"]["amount"] == "5000"
+
+
+def test_rejects_bad_preferences(client):
+    assert client.put("/preferences", json={"markets": ["MOON"]}).status_code == 422
+    assert client.put("/preferences", json={"markets": []}).status_code == 422

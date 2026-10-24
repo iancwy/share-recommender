@@ -12,6 +12,7 @@ class Settings(BaseSettings):
     supabase_anon_key: str = ""
     market_data_provider: str = "yahoo"
     default_exchange: str = "ASX"
+    anthropic_api_key: str = ""  # optional: turns on plain-English explanations
 
     @property
     def supabase_configured(self) -> bool:

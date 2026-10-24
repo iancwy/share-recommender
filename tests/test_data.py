@@ -1,3 +1,5 @@
+from decimal import Decimal
+
 import pytest
 
 from share_recommender.data import available_providers, get_provider
@@ -17,3 +19,21 @@ def test_registry():
     assert isinstance(get_provider("yahoo"), YahooFinanceProvider)
     with pytest.raises(ValueError):
         get_provider("nope")
+
+
+def test_yahoo_converts_pence_to_pounds(monkeypatch):
+    import pandas as pd
+    import yfinance as yf
+
+    class FakeTicker:
+        history_metadata = {"currency": "GBp"}
+
+        def __init__(self, symbol):
+            self.symbol = symbol
+
+        def history(self, **_):
+            return pd.DataFrame({"Close": [12824.0]}, index=pd.to_datetime(["2026-10-23"]))
+
+    monkeypatch.setattr(yf, "Ticker", FakeTicker)
+    quote = YahooFinanceProvider().get_quote("AZN", "LSE")
+    assert quote.price == Decimal("128.24") and quote.currency == "GBP"

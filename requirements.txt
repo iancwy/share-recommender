@@ -8,3 +8,4 @@ pydantic-settings>=2.4
 python-dotenv>=1.0
 yfinance>=0.2.50
 pandas>=2.2
+anthropic>=2.3

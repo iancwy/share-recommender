@@ -10,6 +10,10 @@
    "Success. No rows returned". Under **Table Editor** you will now see `profiles`,
    `categories` and `holdings`, each marked as RLS enabled.
 
+   Then do the same with each later migration in `supabase/migrations/`, oldest first.
+   Week 2 adds `20261025000000_preferences.sql` (interview answers); after running it,
+   `profiles` and `categories` each have a `preferences` column.
+
    (If you prefer the Supabase CLI: `supabase link --project-ref <ref>` then `supabase db push`.)
 
 3. **Copy the keys into `.env`.** Open **Project Settings > API** (or **API Keys**). Copy

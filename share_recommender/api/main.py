@@ -4,16 +4,21 @@ Run locally with:  uvicorn share_recommender.api.main:app --reload
 Interactive docs:  http://127.0.0.1:8000/docs
 """
 
+from decimal import Decimal
+from typing import Annotated
 from uuid import UUID
 
-from fastapi import FastAPI, HTTPException, Request, status
+from fastapi import FastAPI, HTTPException, Query, Request, status
 from fastapi.responses import JSONResponse
 from postgrest.exceptions import APIError
 
 from share_recommender.api.deps import MarketData, Repo
 from share_recommender.core.exchanges import EXCHANGES
 from share_recommender.core.models import Category, CategoryIn, Holding, HoldingIn, Profile
+from share_recommender.core.preferences import CategoryPreferences, InvestorPreferences
+from share_recommender.core.recommender import Recommendation
 from share_recommender.data import Quote
+from share_recommender.recommendations import build_recommendation, provider_fns
 
 app = FastAPI(title="Share Recommender API", version="0.1.0")
 
@@ -47,6 +52,35 @@ def me(repo: Repo) -> Profile:
     if profile is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Profile not found")
     return profile
+
+
+# Preferences interview ------------------------------------------------------
+
+@app.get("/preferences", response_model=InvestorPreferences)
+def get_preferences(repo: Repo) -> InvestorPreferences:
+    prefs = repo.get_preferences()
+    if prefs is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Preferences interview not done yet")
+    return prefs
+
+
+@app.put("/preferences", response_model=InvestorPreferences)
+def save_preferences(body: InvestorPreferences, repo: Repo) -> InvestorPreferences:
+    return repo.save_preferences(body)
+
+
+@app.get("/categories/{category_id}/preferences", response_model=CategoryPreferences)
+def get_category_preferences(category_id: UUID, repo: Repo) -> CategoryPreferences:
+    prefs = repo.get_category_preferences(category_id)
+    if prefs is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Goal questions not answered yet")
+    return prefs
+
+
+@app.put("/categories/{category_id}/preferences", response_model=CategoryPreferences)
+def save_category_preferences(category_id: UUID, body: CategoryPreferences,
+                              repo: Repo) -> CategoryPreferences:
+    return repo.save_category_preferences(category_id, body)
 
 
 # Categories -----------------------------------------------------------------
@@ -99,6 +133,31 @@ def update_holding(holding_id: UUID, body: HoldingIn, repo: Repo) -> Holding:
 @app.delete("/holdings/{holding_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_holding(holding_id: UUID, repo: Repo) -> None:
     repo.delete_holding(holding_id)
+
+
+# Recommendations ------------------------------------------------------------
+
+@app.get("/categories/{category_id}/recommendation", response_model=Recommendation)
+def get_recommendation(
+    category_id: UUID, repo: Repo, market: MarketData,
+    amount: Annotated[Decimal | None, Query(gt=0, description="New money to invest, in base "
+                                                              "currency")] = None,
+) -> Recommendation:
+    category = next((c for c in repo.list_categories() if c.id == category_id), None)
+    if category is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Category not found")
+    inv = repo.get_preferences()
+    if inv is None:
+        raise HTTPException(status.HTTP_409_CONFLICT,
+                            "Complete the preferences interview first (PUT /preferences)")
+    prefs = repo.get_category_preferences(category_id) or CategoryPreferences()
+    profile = repo.get_profile()
+    all_holdings = repo.list_holdings()
+    return build_recommendation(
+        category, inv, prefs, [h for h in all_holdings if h.category_id == category_id],
+        profile.base_currency if profile else "AUD", *provider_fns(market), amount=amount,
+        all_holdings=all_holdings,
+    )
 
 
 # Market data ----------------------------------------------------------------

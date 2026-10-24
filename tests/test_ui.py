@@ -7,6 +7,8 @@ import pytest
 from streamlit.testing.v1 import AppTest
 
 from share_recommender.core.models import HoldingIn
+from share_recommender.core.preferences import DirectShares, GoalStyle, InvestorPreferences
+from share_recommender.core.universe import Theme
 from tests.fakes import FakeClient, FakeProvider, FakeRepository
 
 APP = str(Path(__file__).parents[1] / "share_recommender" / "ui" / "app.py")
@@ -92,3 +94,77 @@ def test_categories_page_adds_template(run_app, repo):
     kids = next(b for b in at.button if "Kids private school" in b.label)
     kids.click().run()
     assert "Kids private school investment fund" in {c.name for c in repo.categories.values()}
+
+
+def test_recommendations_need_the_interview_first(run_app):
+    at = run_app()
+    at.sidebar.radio[0].set_value("Recommendations").run()
+    assert not at.exception
+    _button(at, "Go to Preferences").click().run()
+    assert at.title[0].value == "Preferences"
+
+
+def test_interview_then_recommendation(run_app, repo):
+    at = run_app()
+    at.sidebar.radio[0].set_value("Preferences").run()
+    assert not at.exception
+    at.radio(key="q_direct_shares").set_value(DirectShares.ETF_ONLY)
+    _button(at, "Save my answers").click().run()
+    assert repo.preferences.direct_shares is DirectShares.ETF_ONLY
+
+    (cat,) = repo.categories.values()
+    at.number_input(key=f"q_horizon_years_{cat.id}").set_value(15)
+    _button(at, "Save").click().run()
+    assert repo.category_preferences[cat.id].horizon_years == 15
+
+    at.sidebar.radio[0].set_value("Recommendations").run()
+    assert not at.exception
+    assert at.metric[0].value == "70%"
+    at.number_input(key="rec_amount").set_value(5000.0).run()
+    assert not at.exception
+    assert any("What to buy" in s.value for s in at.subheader)
+
+    with patch("share_recommender.ai.explain.explain", return_value="Plain words.") as fake:
+        _button(at, "Explain it in plain English").click().run()
+    assert fake.called
+    assert any("Plain words." in m.value for m in at.markdown)
+
+
+def test_speculative_goal_from_the_interview(run_app, repo):
+    repo.preferences = InvestorPreferences()
+    (cat,) = repo.categories.values()
+    at = run_app()
+    at.sidebar.radio[0].set_value("Preferences").run()
+    at.radio(key=f"q_style_{cat.id}").set_value(GoalStyle.SPECULATIVE)
+    at.multiselect(key=f"q_themes_{cat.id}").set_value([Theme.AI, Theme.BIOTECH])
+    _button(at, "Save").click().run()
+    saved = repo.category_preferences[cat.id]
+    assert saved.style is GoalStyle.SPECULATIVE and saved.themes == [Theme.AI, Theme.BIOTECH]
+
+    at.sidebar.radio[0].set_value("Recommendations").run()
+    assert not at.exception
+    assert at.metric[0].value == "Speculative"
+
+
+def test_chat_fills_the_questionnaire_for_review(run_app, repo):
+    from share_recommender.ai.interview import Draft, TurnResult
+    from share_recommender.core.preferences import CategoryPreferences, Experience
+
+    (cat,) = repo.categories.values()
+    draft = Draft(InvestorPreferences(experience=Experience.BEGINNER, notes="Saving for a boat."),
+                  {cat.id: CategoryPreferences(horizon_years=12)},
+                  answered={"experience", "notes"}, goal_answered={cat.id: {"horizon_years"}})
+    result = TurnResult("Got it. What markets?", draft, [])
+
+    at = run_app()
+    at.sidebar.radio[0].set_value("Preferences").run()
+    with patch("share_recommender.ai.interview.run_turn", return_value=result) as fake:
+        at.chat_input(key="chat_input").set_value("I'm new and saving for a boat").run()
+    assert not at.exception and fake.called
+    assert any("What markets?" in m.value for m in at.markdown)
+    assert repo.preferences is None  # nothing saved until confirmed
+
+    _button(at, "Save these answers").click().run()
+    assert repo.preferences.experience is Experience.BEGINNER
+    assert repo.preferences.notes == "Saving for a boat."
+    assert repo.category_preferences[cat.id].horizon_years == 12

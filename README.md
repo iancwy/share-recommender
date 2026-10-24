@@ -2,10 +2,18 @@
 
 Ian's private share and ETF recommender and portfolio dashboard.
 
-**Week 1 status:** sign-in per person (Supabase Auth), goal categories, and manual holdings
-entry with add / edit / delete, valued at current prices from Yahoo Finance.
-Coming next: guided preferences interview and recommendations (Week 2), dashboard, health
-check and CSV import (Week 3), notifications (Week 4).
+**Status:**
+- Week 1: sign-in per person (Supabase Auth), goal categories, and manual holdings entry with
+  add / edit / delete, valued at current prices from Yahoo Finance.
+- Week 2: a preferences questionnaire (about you, then each goal), which you can fill in as
+  a form or by chatting with Claude, who fills it in for you to confirm and keeps any extra
+  nuance as notes. Then rules-based
+  recommendations per goal: a target mix, suggested ETFs and shares across ASX, US and other
+  markets, gaps against what you hold, and what to buy with new money. A goal can be marked
+  speculative: a small pot in high-growth themes such as AI, with guardrails on its size.
+  Claude can explain a recommendation in plain English.
+
+Coming next: dashboard, health check and CSV import (Week 3), notifications (Week 4).
 
 ## Run it locally (VS Code)
 
@@ -23,6 +31,8 @@ Needs Python 3.11 or newer.
 
    VS Code should pick up `.venv` automatically (or *Python: Select Interpreter*).
 3. **Configure:** copy `.env.example` to `.env` and paste in your Supabase URL and anon key.
+   Optionally add `ANTHROPIC_API_KEY` (from <https://console.anthropic.com>) to turn on
+   plain-English explanations of recommendations; everything else works without it.
 4. **Run the app:**
 
    ```bash
@@ -44,8 +54,11 @@ ruff check .
 
 ```
 share_recommender/
-  core/       models, exchanges, valuation (pure Python; recommender goes here)
+  core/       models, exchanges, valuation, interview answers, curated investment list
+              and the rules-based recommender (pure Python, no network)
   data/       market data providers (Yahoo Finance first, pluggable)
+  ai/         optional plain-English explanations from Claude
+  recommendations.py   fetches prices, FX and dividend data, then runs the recommender
   db/         Supabase client and repository (row-level security does the per-user scoping)
   api/        FastAPI app for a future web / mobile front end
   ui/         Streamlit app

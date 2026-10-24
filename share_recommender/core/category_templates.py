@@ -18,5 +18,5 @@ CATEGORY_TEMPLATES: list[dict] = [
     {"name": "Emergency buffer", "risk_level": RiskLevel.LOW,
      "description": "Money that may be needed at short notice."},
     {"name": "Speculative", "risk_level": RiskLevel.HIGH,
-     "description": "Small, high-risk positions."},
+     "description": "A small pot for high-growth, high-risk themes such as AI."},
 ]

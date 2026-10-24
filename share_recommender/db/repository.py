@@ -8,6 +8,7 @@ from typing import Any
 from uuid import UUID
 
 from share_recommender.core.models import Category, CategoryIn, Holding, HoldingIn, Profile
+from share_recommender.core.preferences import CategoryPreferences, InvestorPreferences
 from supabase import Client
 
 
@@ -37,6 +38,48 @@ class PortfolioRepository:
             .data
         )
         return Profile.model_validate(rows[0])
+
+    # Interview answers ---------------------------------------------------
+    # An empty JSON object means the interview hasn't been done, returned as None.
+
+    def get_preferences(self) -> InvestorPreferences | None:
+        rows = self._db.table("profiles").select("preferences").limit(1).execute().data
+        return InvestorPreferences.model_validate(rows[0]["preferences"]) if (
+            rows and rows[0]["preferences"]) else None
+
+    def save_preferences(self, prefs: InvestorPreferences) -> InvestorPreferences:
+        profile = self.get_profile()
+        if profile is None:
+            raise LookupError("Profile not found")
+        rows = (
+            self._db.table("profiles")
+            .update({"preferences": prefs.model_dump(mode="json")})
+            .eq("id", str(profile.id))
+            .execute()
+            .data
+        )
+        return InvestorPreferences.model_validate(rows[0]["preferences"])
+
+    def get_category_preferences(self, category_id: UUID) -> CategoryPreferences | None:
+        rows = (self._db.table("categories").select("preferences")
+                .eq("id", str(category_id)).execute().data)
+        if not rows:
+            raise LookupError(f"Category {category_id} not found")
+        return CategoryPreferences.model_validate(rows[0]["preferences"]) if (
+            rows[0]["preferences"]) else None
+
+    def save_category_preferences(self, category_id: UUID, prefs: CategoryPreferences
+                                  ) -> CategoryPreferences:
+        rows = (
+            self._db.table("categories")
+            .update({"preferences": prefs.model_dump(mode="json")})
+            .eq("id", str(category_id))
+            .execute()
+            .data
+        )
+        if not rows:
+            raise LookupError(f"Category {category_id} not found")
+        return CategoryPreferences.model_validate(rows[0]["preferences"])
 
     # Categories ----------------------------------------------------------
 

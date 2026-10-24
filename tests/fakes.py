@@ -5,8 +5,10 @@ from decimal import Decimal
 from types import SimpleNamespace
 from uuid import UUID, uuid4
 
+from share_recommender.core.exchanges import EXCHANGES
 from share_recommender.core.models import Category, CategoryIn, Holding, HoldingIn, Profile
-from share_recommender.data.base import MarketDataProvider, PriceBar, Quote
+from share_recommender.core.preferences import CategoryPreferences, InvestorPreferences
+from share_recommender.data.base import Fundamentals, MarketDataProvider, PriceBar, Quote
 
 USER_ID = UUID("11111111-1111-1111-1111-111111111111")
 
@@ -17,6 +19,26 @@ class FakeRepository:
         general = Category(id=uuid4(), user_id=USER_ID, name="General investing")
         self.categories: dict[UUID, Category] = {general.id: general}
         self.holdings: dict[UUID, Holding] = {}
+        self.preferences: InvestorPreferences | None = None
+        self.category_preferences: dict[UUID, CategoryPreferences] = {}
+
+    def get_preferences(self):
+        return self.preferences
+
+    def save_preferences(self, prefs):
+        self.preferences = prefs
+        return prefs
+
+    def get_category_preferences(self, category_id):
+        if category_id not in self.categories:
+            raise LookupError(category_id)
+        return self.category_preferences.get(category_id)
+
+    def save_category_preferences(self, category_id, prefs):
+        if category_id not in self.categories:
+            raise LookupError(category_id)
+        self.category_preferences[category_id] = prefs
+        return prefs
 
     def get_profile(self):
         return self.profile
@@ -71,19 +93,33 @@ class FakeRepository:
 
 
 class FakeProvider(MarketDataProvider):
+    """Prices default to 100 for any ticker in ``prices``; FX is 1 AUD = 0.5 of anything else."""
+
     name = "fake"
 
-    def __init__(self, prices: dict[tuple[str, str], str] | None = None):
+    def __init__(self, prices: dict[tuple[str, str], str] | None = None,
+                 dividend_yields: dict[tuple[str, str], str] | None = None,
+                 price_everything: bool = False):
         self.prices = prices or {("VAS", "ASX"): "100"}
+        self.dividend_yields = dividend_yields or {}
+        self.price_everything = price_everything
 
     def get_quote(self, ticker, exchange):
-        price = self.prices.get((ticker, exchange))
+        price = self.prices.get((ticker, exchange), "100" if self.price_everything else None)
         if price is None:
             return None
-        return Quote(ticker, exchange, Decimal(price), "AUD", datetime(2026, 10, 23, tzinfo=UTC))
+        return Quote(ticker, exchange, Decimal(price), EXCHANGES[exchange].currency,
+                     datetime(2026, 10, 23, tzinfo=UTC))
 
     def get_history(self, ticker, exchange, start: date, end: date):
         return [PriceBar(start, Decimal("1"))]
+
+    def get_fx_rate(self, base, quote):
+        return Decimal(1) if base == quote else Decimal("0.5")
+
+    def get_fundamentals(self, ticker, exchange):
+        y = self.dividend_yields.get((ticker, exchange))
+        return Fundamentals(dividend_yield=Decimal(y)) if y else None
 
 
 class FakeAuth:
