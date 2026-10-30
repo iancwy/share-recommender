@@ -51,6 +51,10 @@ A holding can only point at a category owned by the same user (composite foreign
 - `holdings`: one row per purchase (parcel): ticker, exchange, units, buy price, buy date,
   fees, platform label (e.g. CMC Markets), category, notes. Deleting a category keeps its
   holdings as "Uncategorised".
+- `price_history` and `price_sync` (Week 3): a shared cache of daily closes and exchange
+  rates (exchange `FX`, ticker like `AUDUSD`), and which date range has been fetched for
+  each. Any signed-in user can read and add to it; nobody can delete. It holds market data
+  only, never anyone's holdings.
 - `profiles.preferences` and `categories.preferences` (Week 2): interview answers as JSON,
   validated by `InvestorPreferences` and `CategoryPreferences` in `core/preferences.py`.
   An empty object means the interview hasn't been done.
@@ -117,8 +121,42 @@ semiconductors, cybersecurity, clean energy, biotech):
 Each step records its reasons, which the page shows and Claude can turn into prose. Claude
 never changes the numbers.
 
+## Dashboard, health check and import (Week 3)
+
+- **Price history** (`data/history.py`) wraps the market data provider with the Supabase
+  cache. Each instrument is fetched once; later requests only fetch days before the cached
+  range, or after it if it wasn't refreshed today (re-fetching the last cached day, whose
+  close may have been mid-session). If the cache tables are missing, history comes straight
+  from Yahoo.
+- **Dashboard** (`core/performance.py`): value over time sums units held on each day times
+  that day's close (daily up to about 13 months, weekly beyond), converted at that day's
+  exchange rate; money invested is cost including fees at the rate on the buy date.
+  Breakdowns fold anything past the top 10 into "Other". Goal progress projects the current
+  value to the target date at an assumed 7% a year for shares and 3.5% for bonds and cash,
+  and works out the monthly top-up needed. These are illustrations, not forecasts.
+- **Health check** (`core/health.py`): per goal, drift from the target mix (warning at 5
+  points, alert at 10), too much in shares within 2 years of a deadline, and on or behind
+  target; per platform, brokerage as a share of money invested (warning at 1%); across the
+  portfolio, any one company over 10% (alert at 20%), unpriced or uncategorised holdings,
+  and currency exposure. Fixes are always about where new money goes, never selling, so
+  the check never triggers capital gains tax.
+- **CSV import** (`core/importer.py`): detects CommSec's layout (a Details column like
+  `B 100 VAS @ 95.50`, with brokerage worked out from the debit) or one column per field
+  (CMC Markets and most others), matching headers against common names. The person can fix
+  the column mapping, sees every row's status, and duplicates of existing holdings are
+  unticked. Only purchases are imported; sales are listed for the person to adjust their
+  parcels. A third layout, the **holdings snapshot** (CMC's profit and loss export: Code,
+  Units Held, Net Avg Price AUD, FX Rate), has no dates. It is imported after the
+  transaction history: per stock it adds only the units existing holdings don't cover, as
+  one parcel dated at an "as at" date (by default the earliest purchase already imported
+  for that platform), priced so the total cost matches the broker's. AUD prices of overseas
+  shares are converted with the file's FX rate, `:US` codes resolve to NASDAQ or NYSE, and
+  rows with no cost (such as demerger shares) need a price entered before import.
+- **Classification**: holdings not on the curated list count as one company's shares
+  (Australian on the ASX, international elsewhere). Diversified funds such as DHHF and VDHG
+  are split across asset classes by their approximate target allocation, in the gaps, the
+  dashboard breakdown and the goal projections.
+
 ## Plan for later weeks
 
-- Week 3: dashboard and health check by category and platform; CSV import from broker exports;
-  daily price cache table.
 - Week 4: notifications (email first) and polish.

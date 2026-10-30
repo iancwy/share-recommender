@@ -48,6 +48,7 @@ from share_recommender.core.universe import (
     Instrument,
     Kind,
     Theme,
+    classify,
     lookup,
 )
 from share_recommender.data.base import Fundamentals, Quote
@@ -77,7 +78,6 @@ SPECULATIVE_MAX_ETFS = 2                   # 3 when the person wants ETFs only
 SPECULATIVE_MAX_SHARES = 6
 SPECULATIVE_MIN_HORIZON = 5
 SPECULATIVE_MAX_PORTFOLIO_PCT = Decimal(10)
-OTHER = "other"
 CENT = Decimal("0.01")
 
 
@@ -111,7 +111,7 @@ class TargetMix(BaseModel):
 
 
 class SliceGap(BaseModel):
-    key: str  # an AssetClass value, or "other" for holdings the recommender doesn't know
+    key: str  # an AssetClass value
     label: str
     target_pct: Decimal
     current_pct: Decimal
@@ -259,7 +259,7 @@ def _direct_fraction(inv: InvestorPreferences) -> Decimal:
 def _choose_etf(asset_class: AssetClass, inv: InvestorPreferences,
                 held: set[tuple[str, str]]) -> tuple[Instrument | None, str]:
     options = [e for e in ETFS if e.asset_class is asset_class and allowed(e, inv)
-               and e.style is not EtfStyle.THEMATIC]
+               and e.style not in {EtfStyle.THEMATIC, EtfStyle.DIVERSIFIED}]
     label = ASSET_CLASS_LABELS[asset_class].lower().replace("australian", "Australian")
     if not options:
         return None, ""
@@ -540,17 +540,19 @@ def holding_values(holdings: list[Holding], quotes: dict[tuple[str, str], Quote 
     return values, list(dict.fromkeys(notes))
 
 
-def _slice_of(key: tuple[str, str]) -> str:
-    inst = lookup(*key)
-    return inst.asset_class.value if inst else OTHER
+def by_asset_class(values: dict[tuple[str, str], Decimal]) -> dict[AssetClass, Decimal]:
+    """Value in each asset class, splitting diversified funds across their classes."""
+    out: dict[AssetClass, Decimal] = {}
+    for key, v in values.items():
+        for ac, frac in classify(*key).items():
+            out[ac] = out.get(ac, Decimal(0)) + v * frac
+    return out
 
 
 def analyse_gaps(mix: TargetMix, values: dict[tuple[str, str], Decimal], base: str,
                  notes: list[str] | None = None) -> Gaps:
     total = sum(values.values(), Decimal(0))
-    current: dict[str, Decimal] = {}
-    for key, v in values.items():
-        current[_slice_of(key)] = current.get(_slice_of(key), Decimal(0)) + v
+    current = {ac.value: v for ac, v in by_asset_class(values).items()}
 
     def pct(v: Decimal) -> Decimal:
         return (v / total * 100).quantize(Decimal("0.1")) if total else Decimal(0)
@@ -565,15 +567,18 @@ def analyse_gaps(mix: TargetMix, values: dict[tuple[str, str], Decimal], base: s
                              difference=(target_value - cur).quantize(CENT)))
     for key, cur in current.items():
         if key not in {s.asset_class.value for s in mix.slices}:
-            label = (ASSET_CLASS_LABELS[AssetClass(key)] if key != OTHER
-                     else "Not on the recommender's list")
-            rows.append(SliceGap(key=key, label=label, target_pct=Decimal(0),
-                                 current_pct=pct(cur), current_value=cur.quantize(CENT),
-                                 target_value=Decimal(0), difference=-cur.quantize(CENT)))
+            rows.append(SliceGap(key=key, label=ASSET_CLASS_LABELS[AssetClass(key)],
+                                 target_pct=Decimal(0), current_pct=pct(cur),
+                                 current_value=cur.quantize(CENT), target_value=Decimal(0),
+                                 difference=-cur.quantize(CENT)))
     gap_notes = list(notes or [])
-    if current.get(OTHER):
-        gap_notes.append("Holdings that aren't on the recommender's list are shown separately. "
-                         "New money isn't added to them.")
+    unknown = sorted({t for t, ex in values if lookup(t, ex) is None})
+    if unknown:
+        gap_notes.append(f"{', '.join(unknown)} aren't on the recommender's list, so each is "
+                         "counted as one company's shares (Australian if on the ASX).")
+    if any((i := lookup(*k)) and i.split for k in values):
+        gap_notes.append("Diversified funds are split across asset classes by their "
+                         "approximate target allocation.")
     return Gaps(base_currency=base, total_value=total.quantize(CENT), slices=rows, notes=gap_notes)
 
 
@@ -596,11 +601,7 @@ def plan_purchase(mix: TargetMix, values: dict[tuple[str, str], Decimal], amount
             picks.append(p)
 
     total_after = sum(values.values(), Decimal(0)) + amount
-    slice_current: dict[AssetClass, Decimal] = {}
-    for key, v in values.items():
-        inst = lookup(*key)
-        if inst:
-            slice_current[inst.asset_class] = slice_current.get(inst.asset_class, Decimal(0)) + v
+    slice_current = by_asset_class(values)
 
     # How far each pick is below its share of the slice's target, after the new money.
     want: dict[tuple[str, str], Decimal] = {}

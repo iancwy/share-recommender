@@ -59,6 +59,7 @@ def test_login_screen_when_signed_out(run_app):
 def test_add_holding_and_value_it(run_app, repo):
     at = run_app()
     assert not at.exception
+    at.sidebar.radio[0].set_value("Holdings").run()
 
     at.text_input[0].input("vas")
     at.number_input[0].set_value(10.0)   # units
@@ -81,6 +82,7 @@ def test_add_holding_and_value_it(run_app, repo):
 
 def test_validation_errors_shown(run_app, repo):
     at = run_app()
+    at.sidebar.radio[0].set_value("Holdings").run()
     at.text_input[0].input("VAS")
     _button(at, "Add holding").click().run()  # units and price left at 0
     assert not repo.holdings
@@ -168,3 +170,91 @@ def test_chat_fills_the_questionnaire_for_review(run_app, repo):
     assert repo.preferences.experience is Experience.BEGINNER
     assert repo.preferences.notes == "Saving for a boat."
     assert repo.category_preferences[cat.id].horizon_years == 12
+
+
+def _with_holdings(repo):
+    from datetime import date
+
+    (cat,) = repo.categories.values()
+    for ticker, units in [("VAS", 10), ("CBA", 5)]:
+        repo.create_holding(HoldingIn(ticker=ticker, exchange="ASX", units=units, buy_price=90,
+                                      buy_date=date(2026, 1, 5), platform="CMC Markets",
+                                      category_id=cat.id))
+    return cat
+
+
+def test_dashboard(run_app, repo):
+    at = run_app()
+    assert not at.exception
+    assert any("No holdings yet" in i.value for i in at.info)
+
+    _with_holdings(repo)
+    at.run()
+    assert not at.exception
+    assert at.title[0].value == "Dashboard"
+    assert at.metric[0].label == "Portfolio value (AUD)"
+    assert at.metric[1].value == "1,350"  # 15 units at 90
+    at.radio(key="dash_by").set_value(at.radio(key="dash_by").options[1]).run()  # platform
+    assert not at.exception
+    at.radio(key="dash_period").set_value("All").run()
+    assert not at.exception
+
+
+def test_health_check_page(run_app, repo):
+    _with_holdings(repo)
+    at = run_app()
+    at.sidebar.radio[0].set_value("Health check").run()
+    assert not at.exception
+    labels = [m.label for m in at.metric]
+    assert labels == ["⛔ Alert", "⚠️ Warning", "ℹ️ Info", "✅ OK"]
+    text = " ".join(m.value for m in at.markdown)
+    assert "in one company (CBA)" in text and "Preferences not answered" in text
+
+
+def test_import_from_pasted_csv(run_app, repo):
+    from tests.test_importer import COMMSEC
+
+    at = run_app()
+    at.sidebar.radio[0].set_value("Import").run()
+    assert not at.exception
+    at.text_area(key="import_text_0").input(COMMSEC).run()
+    assert not at.exception
+    assert any("Found **2 purchase(s)**" in m.value for m in at.markdown)
+    _button(at, "Import 2 holding(s)").click().run()
+    assert not at.exception
+    assert sorted(h.ticker for h in repo.holdings.values()) == ["CBA", "VAS"]
+    assert {h.platform for h in repo.holdings.values()} == {"CommSec"}
+    (cat,) = repo.categories.values()
+    assert {h.category_id for h in repo.holdings.values()} == {cat.id}
+
+    # Importing the same file again finds only duplicates.
+    at.text_area(key="import_text_1").input(COMMSEC).run()
+    assert any("2 are already in your holdings" in m.value for m in at.markdown)
+    assert _button(at, "Import 0 holding(s)").disabled
+
+
+def test_import_snapshot_after_transaction_history(run_app, repo):
+    from datetime import date
+    from decimal import Decimal
+
+    from tests.test_importer import SNAPSHOT
+
+    history_start = date(2024, 5, 1)
+    repo.create_holding(HoldingIn(ticker="VAS", exchange="ASX", units=200, buy_price=95,
+                                  fees=10, buy_date=history_start, platform="CMC Markets"))
+    at = run_app()
+    at.sidebar.radio[0].set_value("Import").run()
+    at.text_area(key="import_text_0").input(SNAPSHOT).run()
+    assert not at.exception
+    # The date defaults to the earliest purchase already imported for CMC Markets.
+    assert at.date_input(key="import_as_at_0").value == history_start
+    assert any("**1** needing a price" in m.value for m in at.markdown)  # WDS
+    _button(at, "Import 3 holding(s)").click().run()  # MSFT, the rest of VAS, DHHF
+    assert not at.exception
+
+    added = sorted((h for h in repo.holdings.values() if h.buy_date == history_start
+                    and h.fees == 0), key=lambda h: h.ticker)
+    assert [(h.ticker, h.units) for h in added] == [("DHHF", 100), ("MSFT", 10), ("VAS", 100)]
+    vas = next(h for h in added if h.ticker == "VAS")
+    assert vas.buy_price == Decimal("79.9")
+    assert next(h for h in added if h.ticker == "MSFT").exchange == "NASDAQ"

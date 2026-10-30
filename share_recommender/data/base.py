@@ -49,6 +49,10 @@ class MarketDataProvider(ABC):
     def get_fx_rate(self, base: str, quote: str) -> Decimal | None:
         """Units of ``quote`` currency per 1 unit of ``base``, e.g. AUD->USD 0.65, or None."""
 
+    def get_fx_history(self, base: str, quote: str, start: date, end: date) -> list[PriceBar]:
+        """Daily ``quote`` per 1 ``base`` between start and end, oldest first. Optional."""
+        return []
+
     def get_fundamentals(self, ticker: str, exchange: str) -> Fundamentals | None:
         """Basic ratios used to rank shares. Providers without them return None."""
         return None

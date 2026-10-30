@@ -4,10 +4,11 @@ The UI only talks to the repository, core and data packages, so it can be
 replaced by a web or mobile front end on top of the FastAPI app later.
 """
 
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 from uuid import UUID
 
+import altair as alt
 import pandas as pd
 import streamlit as st
 from postgrest.exceptions import APIError
@@ -19,14 +20,33 @@ from share_recommender.ai.explain import explain
 from share_recommender.config import get_settings
 from share_recommender.core.category_templates import CATEGORY_TEMPLATES
 from share_recommender.core.exchanges import EXCHANGES
+from share_recommender.core.health import SEVERITY_ORDER, Severity
+from share_recommender.core.importer import (
+    Broker,
+    Layout,
+    Mapping,
+    detect,
+    guess_broker,
+    parse_rows,
+    read_csv,
+)
 from share_recommender.core.models import Category, CategoryIn, Holding, HoldingIn, RiskLevel
-from share_recommender.core.portfolio import totals_by_currency, value_holdings
+from share_recommender.core.performance import Dimension, breakdown, goal_progress
+from share_recommender.core.portfolio import UNCATEGORISED, totals_by_currency, value_holdings
 from share_recommender.core.preferences import CategoryPreferences, GoalStyle, InvestorPreferences
 from share_recommender.core.questionnaire import ABOUT_YOU, GOAL, Question
 from share_recommender.core.recommender import Recommendation, horizon_years, is_speculative
 from share_recommender.data import Fundamentals, Quote, get_provider
+from share_recommender.data.history import CachedHistory
+from share_recommender.db.price_store import SupabasePriceStore
 from share_recommender.db.repository import PortfolioRepository
 from share_recommender.db.supabase_client import SupabaseNotConfigured, anon_client
+from share_recommender.portfolio_service import (
+    health_report,
+    portfolio_history,
+    total,
+    valued_holdings,
+)
 from share_recommender.recommendations import build_recommendation
 from supabase import Client
 
@@ -659,6 +679,391 @@ def _recommendations_page(repo: PortfolioRepository) -> None:
             st.caption("Written by Claude from the tool's results.")
 
 
+# Charts -----------------------------------------------------------------------
+# Colours from the dataviz reference palette, light and dark steps.
+
+PALETTE = {
+    "light": {"series": ["#2a78d6", "#eb6834"], "muted": "#898781", "grid": "#e1e0d9"},
+    "dark": {"series": ["#3987e5", "#d95926"], "muted": "#898781", "grid": "#2c2c2a"},
+}
+SEVERITY_BADGE = {
+    Severity.ALERT: "⛔ Alert", Severity.WARN: "⚠️ Warning",
+    Severity.INFO: "ℹ️ Info", Severity.OK: "✅ OK",
+}
+
+
+def _palette() -> dict:
+    theme = getattr(getattr(st, "context", None), "theme", None)
+    return PALETTE["dark" if getattr(theme, "type", "light") == "dark" else "light"]
+
+
+def _value_chart(points: list, base: str) -> alt.Chart:
+    pal = _palette()
+    wide = pd.DataFrame([{"Day": pd.Timestamp(p.day), "Value": float(p.value),
+                          "Money invested": float(p.invested)} for p in points])
+    long = wide.melt("Day", var_name="Series", value_name="Amount")
+    series = ["Value", "Money invested"]
+    long_range = (points[-1].day - points[0].day).days > 180
+    x = alt.X("Day:T", title=None, axis=alt.Axis(
+        grid=False, labelColor=pal["muted"], format="%b %Y" if long_range else "%d %b",
+        tickCount=6))
+    y = alt.Y("Amount:Q", title=None, axis=alt.Axis(format=",.0f", gridColor=pal["grid"],
+                                                     labelColor=pal["muted"], tickCount=5))
+    color = alt.Color("Series:N", scale=alt.Scale(domain=series, range=pal["series"]),
+                      legend=alt.Legend(orient="top", title=None))
+    nearest = alt.selection_point(nearest=True, on="pointerover", fields=["Day"], empty=False)
+    lines = alt.Chart(long).mark_line(strokeWidth=2).encode(x=x, y=y, color=color)
+    # Invisible full-height rules are the hover targets and carry the tooltip.
+    targets = alt.Chart(wide).mark_rule(opacity=0, strokeWidth=12).encode(
+        x="Day:T",
+        tooltip=[alt.Tooltip("Day:T", title="Date", format="%d %b %Y"),
+                 alt.Tooltip("Value:Q", title=f"Value ({base})", format=",.0f"),
+                 alt.Tooltip("Money invested:Q", title=f"Invested ({base})", format=",.0f")],
+    ).add_params(nearest)
+    crosshair = alt.Chart(wide).mark_rule(color=pal["muted"], strokeWidth=1).encode(
+        x="Day:T").transform_filter(nearest)
+    dots = lines.mark_point(filled=True, size=64, opacity=1).encode(
+        opacity=alt.condition(nearest, alt.value(1), alt.value(0)))
+    return alt.layer(lines, crosshair, dots, targets).properties(height=320)
+
+
+def _bar_chart(slices: list, base: str) -> alt.Chart:
+    pal = _palette()
+    df = pd.DataFrame([{"Label": s.label, "Value": float(s.value), "Share": float(s.pct),
+                        "Share label": f"{s.pct:g}%"} for s in slices])
+    order = list(df["Label"])
+    y = alt.Y("Label:N", sort=order, title=None, axis=alt.Axis(labelLimit=220, ticks=False))
+    bars = alt.Chart(df).mark_bar(color=pal["series"][0], cornerRadiusEnd=4, height=18).encode(
+        x=alt.X("Value:Q", title=None, axis=alt.Axis(format=",.0f", gridColor=pal["grid"],
+                                                     labelColor=pal["muted"], tickCount=4)),
+        y=y,
+        tooltip=[alt.Tooltip("Label:N", title=" "),
+                 alt.Tooltip("Value:Q", title=f"Value ({base})", format=",.0f"),
+                 alt.Tooltip("Share:Q", title="Share (%)", format=".1f")],
+    )
+    labels = bars.mark_text(align="left", dx=6, color=pal["muted"]).encode(
+        text="Share label:N")
+    return alt.layer(bars, labels).properties(height=max(120, 32 * len(df)))
+
+
+# Dashboard --------------------------------------------------------------------
+
+PERIODS = {"1 month": 31, "6 months": 183, "1 year": 365, "3 years": 3 * 365, "All": None}
+
+
+@st.cache_data(ttl=6 * 60 * 60, show_spinner="Fetching price history…")
+def _history(symbols: tuple[tuple[str, str], ...], currencies: tuple[str, ...], base: str,
+             start: date, end: date):
+    history = CachedHistory(get_provider(), SupabasePriceStore(_client()))
+    prices = {s: history.history(*s, start, end) for s in symbols}
+    fx = {c: history.fx_history(base, c, start, end) for c in currencies}
+    return prices, fx
+
+
+def _dashboard_page(repo: PortfolioRepository) -> None:
+    holdings = repo.list_holdings()
+    if not holdings:
+        st.info("No holdings yet. Add them on the Holdings page, or import a broker export on "
+                "the Import page.")
+        return
+    categories = repo.list_categories()
+    profile = repo.get_profile()
+    base = profile.base_currency if profile else "AUD"
+    values = valued_holdings(holdings, base, _quotes, _fx_rates)
+    value, cost = total(values)
+    gain = value - cost
+
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric(f"Portfolio value ({base})", f"{value:,.0f}")
+    m2.metric(f"Money invested ({base})", f"{cost:,.0f}")
+    m3.metric(f"Gain ({base})", f"{gain:,.0f}",
+              delta=f"{gain / cost * 100:.1f}%" if cost else None)
+    m4.metric("Holdings", len(holdings))
+    if any(not v.priced for v in values):
+        st.caption("Some holdings have no current price and are counted at what you paid.")
+
+    st.subheader("Value over time")
+    period = st.radio("Period", list(PERIODS), index=2, horizontal=True, key="dash_period",
+                      label_visibility="collapsed")
+    today = date.today()
+    first_buy = min(h.buy_date for h in holdings)
+    days = PERIODS[period]
+    start = max(first_buy, today - timedelta(days=days)) if days else first_buy
+    points = portfolio_history(holdings, base, start, today, _history)
+    if len(points) > 1:
+        st.altair_chart(_value_chart(points, base), use_container_width=True)
+        with st.expander("Show as a table"):
+            st.dataframe(pd.DataFrame([{"Date": p.day, f"Value ({base})": float(p.value),
+                                        f"Money invested ({base})": float(p.invested)}
+                                       for p in points]), hide_index=True)
+        st.caption("Money invested is what you paid, including fees, at the exchange rate on "
+                   "the day. Value uses each day's closing price.")
+    else:
+        st.caption("Not enough history yet to draw a chart.")
+
+    st.subheader("Where your money is")
+    by = st.radio("Break down by", list(Dimension), horizontal=True, key="dash_by",
+                  format_func=lambda d: d.value)
+    slices = breakdown(values, categories, by)
+    st.altair_chart(_bar_chart(slices, base), use_container_width=True)
+    with st.expander("Show as a table"):
+        st.dataframe(pd.DataFrame([{by.value: s.label, f"Value ({base})": float(s.value),
+                                    "Share (%)": float(s.pct)} for s in slices]),
+                     hide_index=True)
+
+    st.subheader("Progress towards your goals")
+    for cat in categories:
+        in_goal = [v for v in values if v.holding.category_id == cat.id]
+        p = goal_progress(cat, in_goal, today)
+        with st.container(border=True):
+            st.markdown(f"**{cat.name}**")
+            if p.target:
+                st.progress(min(float(p.value / p.target), 1.0),
+                            text=f"{p.value:,.0f} of {p.target:,.0f} {base} "
+                                 f"({p.pct_of_target:g}%)")
+            else:
+                st.markdown(f"{p.value:,.0f} {base}. Set a target amount on the Categories page "
+                            "to track progress.")
+            if p.on_track is True:
+                st.caption(f"✅ On track: about {p.projected:,.0f} {base} by "
+                           f"{cat.target_date:%b %Y} at an assumed "
+                           f"{p.assumed_return * 100:g}% a year.")
+            elif p.on_track is False:
+                st.caption(f"⚠️ Behind: about {p.projected:,.0f} {base} by "
+                           f"{cat.target_date:%b %Y} at an assumed {p.assumed_return * 100:g}% "
+                           f"a year. Adding about {p.monthly_needed:,.0f} {base} a month would "
+                           "close the gap.")
+    st.caption("Projections assume steady returns of 7% a year for shares and 3.5% for bonds "
+               "and cash, before fees and tax. Real returns vary a lot from year to year; "
+               "this is an illustration, not a forecast.")
+
+
+# Health check -----------------------------------------------------------------
+
+def _health_page(repo: PortfolioRepository) -> None:
+    holdings = repo.list_holdings()
+    if not holdings:
+        st.info("No holdings yet, so there's nothing to check.")
+        return
+    categories = repo.list_categories()
+    profile = repo.get_profile()
+    base = profile.base_currency if profile else "AUD"
+    goal_prefs = {c.id: repo.get_category_preferences(c.id) for c in categories}
+    report = health_report(categories, holdings, repo.get_preferences(), goal_prefs, base,
+                           _quotes, _fx_rates, _fundamentals)
+
+    st.caption("Checks each goal against its target mix and deadline, and the whole portfolio "
+               "for concentration, fees and missing data. Fixes are always about where new "
+               "money goes: nothing here suggests selling.")
+    cols = st.columns(4)
+    for col, sev in zip(cols, SEVERITY_ORDER, strict=True):
+        col.metric(SEVERITY_BADGE[sev], report.count(sev))
+
+    areas = list(dict.fromkeys(["Portfolio"] + [c.name for c in categories]
+                               + [p.platform for p in report.platforms]))
+    for area in areas:
+        found = [f for f in report.findings if f.area == area]
+        if not found:
+            continue
+        kind = ("Goal" if area in {c.name for c in categories} else
+                "Platform" if area != "Portfolio" else "")
+        st.subheader(f"{kind}: {area}" if kind else area)
+        for f in found:
+            with st.container(border=True):
+                st.markdown(f"**{SEVERITY_BADGE[f.severity]} · {f.title}**")
+                st.markdown(f.detail)
+                if f.action:
+                    st.caption(f"What to do: {f.action}")
+
+    st.subheader("By platform")
+    st.dataframe(pd.DataFrame([
+        {"Platform": p.platform, f"Value ({base})": float(p.value), "Share (%)": float(p.pct),
+         "Holdings": p.holdings, f"Invested ({base})": float(p.invested),
+         f"Brokerage paid ({base})": float(p.fees), "Brokerage (% of invested)": float(p.fees_pct)}
+        for p in report.platforms
+    ]), hide_index=True)
+
+
+# Import -----------------------------------------------------------------------
+
+NONE = "(none)"
+LAYOUT_NAMES = {
+    Layout.COLUMNS: "Transactions, one column per field (CMC Markets and most others)",
+    Layout.COMMSEC: "CommSec transactions (Details column like 'B 100 VAS @ 95.50')",
+    Layout.SNAPSHOT: "Holdings snapshot, one row per stock (CMC Markets profit and loss)",
+}
+LAYOUT_FIELDS = {
+    Layout.COLUMNS: ["date", "side", "ticker", "exchange", "units", "price", "fees", "value"],
+    Layout.COMMSEC: ["date", "details", "value", "fees"],
+    Layout.SNAPSHOT: ["ticker", "exchange", "units", "cost", "price", "fx"],
+}
+FIELD_NAMES = {"fx": "FX rate", "units": "Units", "price": "Average price (if no cost)",
+               "ticker": "Code", "cost": "Total cost"}
+
+
+def _decode(data: bytes) -> str:
+    for encoding in ("utf-8-sig", "cp1252"):
+        try:
+            return data.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+    return data.decode("utf-8", errors="replace")
+
+
+def _import_page(repo: PortfolioRepository) -> None:
+    ss = st.session_state
+    run = ss.setdefault("import_run", 0)
+    st.caption("Import purchases from a CommSec or CMC Markets export: transaction history, or "
+               "a holdings snapshot such as CMC's profit and loss export. You'll see exactly "
+               "what will be added before anything is saved.")
+    upload = st.file_uploader("Broker export (CSV)", type=["csv"], key=f"import_file_{run}")
+    pasted = st.text_area("…or paste the file's contents", key=f"import_text_{run}", height=100)
+    text = _decode(upload.getvalue()) if upload else pasted
+    if not text.strip():
+        return
+
+    header, rows, header_line = read_csv(text)
+    if not header or not rows:
+        st.error("Couldn't find a header row and data in that file.")
+        return
+    mapping = detect(header)
+    broker = guess_broker(mapping, upload.name if upload else None)
+
+    categories = repo.list_categories()
+    holdings = repo.list_holdings()
+    platforms = list(dict.fromkeys([Broker.COMMSEC.value, Broker.CMC.value]
+                                   + sorted({h.platform for h in holdings if h.platform})))
+    c1, c2, c3 = st.columns(3)
+    platform = c1.selectbox(
+        "Platform", platforms, accept_new_options=True, key=f"import_platform_{run}",
+        index=platforms.index(broker.value) if broker is not Broker.OTHER else None,
+        placeholder="Choose or type a platform")
+    goal_names = [c.name for c in categories] + [UNCATEGORISED]
+    goal = c2.selectbox("Goal for these holdings", goal_names, key=f"import_goal_{run}",
+                        help="You can change it row by row below.")
+    exchanges = list(EXCHANGES)
+    default_exchange = c3.selectbox(
+        "Exchange, when the file doesn't say", exchanges, key=f"import_exchange_{run}",
+        index=exchanges.index(get_settings().default_exchange.upper())
+        if get_settings().default_exchange.upper() in exchanges else 0)
+
+    with st.expander(f"Columns ({LAYOUT_NAMES[mapping.layout]})",
+                     expanded=bool(mapping.missing())):
+        layouts = list(Layout)
+        layout = st.radio("Layout", layouts, index=layouts.index(mapping.layout),
+                          key=f"import_layout_{run}", format_func=LAYOUT_NAMES.get)
+        options = [NONE] + header
+        cols = st.columns(4)
+        chosen = {}
+        for i, f in enumerate(LAYOUT_FIELDS[layout]):
+            current = mapping.columns.get(f)
+            pick = cols[i % 4].selectbox(FIELD_NAMES.get(f, f.capitalize()), options,
+                                         key=f"import_col_{f}_{run}",
+                                         index=options.index(current) if current in options
+                                         else 0)
+            chosen[f] = None if pick == NONE else pick
+        mapping = Mapping(layout, chosen, broker)
+    if missing := mapping.missing():
+        st.error(f"Choose the column for: {', '.join(missing)}.")
+        return
+
+    as_at = None
+    if mapping.layout is Layout.SNAPSHOT:
+        on_platform = [h.buy_date for h in holdings if h.platform == platform]
+        st.info("This file lists what you hold, without purchase dates. Import your transaction "
+                "history first: then this adds only the units it doesn't cover, as one parcel "
+                "per stock dated below and priced so the total cost matches the broker's.")
+        as_at = st.date_input(
+            "Date for holdings not in your transaction history", key=f"import_as_at_{run}",
+            value=min(on_platform) if on_platform else date.today(), max_value=date.today(),
+            format="DD/MM/YYYY",
+            help="Use the earliest date your transaction history reaches. It defaults to your "
+                 "earliest purchase already imported for this platform.")
+
+    goal_ids = {c.name: c.id for c in categories} | {UNCATEGORISED: None}
+    parsed = parse_rows(rows, mapping, default_exchange=default_exchange, platform=platform,
+                        category_id=goal_ids[goal], existing=holdings, header_line=header_line,
+                        as_at=as_at)
+
+    def status(r) -> str:
+        if r.importable:
+            text = "Already in your holdings" if r.duplicate else "Ready to import"
+            return f"{text}. {r.note}" if r.note else text
+        return r.problem or r.note or "Skipped"
+
+    def cell(r, name):
+        source = r.holding.model_dump() if r.holding else (r.partial or {})
+        return source.get(name)
+
+    def number(value):
+        return float(value) if value is not None else None
+
+    df = pd.DataFrame([{
+        "Import": r.importable and not r.duplicate,
+        "Line": r.line,
+        "Ticker": cell(r, "ticker") or "",
+        "Exchange": cell(r, "exchange") or "",
+        "Ccy": EXCHANGES[cell(r, "exchange")].currency if cell(r, "exchange") else "",
+        "Date": cell(r, "buy_date"),
+        "Units": number(cell(r, "units")),
+        "Price": number(cell(r, "buy_price")),
+        "Fees": number(cell(r, "fees")),
+        "Cost": (float(r.holding.cost_base) if r.holding else None),
+        "Goal": goal,
+        "Status": status(r),
+    } for r in parsed])
+    buys = [r for r in parsed if r.importable]
+    sells = [r for r in parsed if r.side == "sell"]
+    covered = [r for r in parsed if r.side == "covered"]
+    needs_price = [r for r in parsed if r.partial]
+    st.markdown(f"Found **{len(buys)} purchase(s)** ready"
+                + (f", of which {sum(r.duplicate for r in buys)} are already in your holdings"
+                   if any(r.duplicate for r in buys) else "")
+                + (f", **{len(needs_price)}** needing a price" if needs_price else "")
+                + (f", {len(covered)} already covered" if covered else "")
+                + (f", and **{len(sells)} sale(s)**" if sells else "")
+                + f", in {len(parsed)} rows.")
+    edited = st.data_editor(
+        df, hide_index=True, key=f"import_rows_{run}",
+        disabled=[c for c in df.columns if c not in {"Import", "Goal", "Price"}],
+        column_config={
+            "Goal": st.column_config.SelectboxColumn(options=goal_names, required=True),
+            "Date": st.column_config.DateColumn(format="DD/MM/YYYY"),
+            "Price": st.column_config.NumberColumn(
+                format="%.4f", min_value=0,
+                help="Per unit, in the exchange's currency (Ccy). You can change it."),
+            "Fees": st.column_config.NumberColumn(format="%.2f"),
+            "Cost": st.column_config.NumberColumn(
+                format="%.2f", help="Units x price + fees, in the exchange's currency"),
+            "Status": st.column_config.TextColumn(width="large"),
+        })
+    if needs_price:
+        st.caption("For rows with no cost, enter the cost per unit in Price and tick Import. For "
+                   "demerger shares, the cost base is usually a share of the original holding's "
+                   "cost; check the company's or the ATO's guidance.")
+    if sells:
+        st.caption("Sales aren't imported, because holdings are recorded purchase by purchase. "
+                   "After importing, reduce or delete the parcels you've sold on the Holdings "
+                   "page.")
+
+    chosen_rows = []
+    for r, (_, e) in zip(parsed, edited.iterrows(), strict=True):
+        if not e["Import"] or pd.isna(e["Price"]) or e["Price"] <= 0:
+            continue
+        price = Decimal(str(e["Price"]))
+        if r.importable:
+            chosen_rows.append((r.holding.model_copy(update={"buy_price": price}), e["Goal"]))
+        elif r.partial:
+            chosen_rows.append((HoldingIn(**r.partial, buy_price=price), e["Goal"]))
+    if st.button(f"Import {len(chosen_rows)} holding(s)", type="primary",
+                 disabled=not chosen_rows, key=f"import_go_{run}"):
+        for holding, g in chosen_rows:
+            repo.create_holding(holding.model_copy(update={"category_id": goal_ids.get(g)}))
+        ss.import_run = run + 1  # fresh, empty widgets
+        st.toast(f"Imported {len(chosen_rows)} holding(s)")
+        st.rerun()
+
+
 # Profile ----------------------------------------------------------------------
 
 def _profile_page(repo: PortfolioRepository, email: str) -> None:
@@ -702,24 +1107,31 @@ def main() -> None:
             st.session_state.clear()
             st.rerun()
 
-        page = st.radio("Go to", ["Holdings", "Categories", "Preferences", "Recommendations",
-                                  "Profile"], key="page")
+        page = st.radio("Go to", list(PAGES), key="page")
 
     st.title(page)
-    if page == "Holdings":
-        _holdings_page(repo)
-    elif page == "Categories":
-        _categories_page(repo)
-    elif page in {"Preferences", "Recommendations"}:
-        try:
-            (_preferences_page if page == "Preferences" else _recommendations_page)(repo)
-        except APIError as exc:
-            if exc.code != "42703":  # undefined column
-                raise
-            st.error("The database needs the Week 2 update. In Supabase, open SQL Editor and "
-                     "run supabase/migrations/20261025000000_preferences.sql, then reload.")
-    else:
-        _profile_page(repo, user.email)
+    try:
+        if page == "Profile":
+            _profile_page(repo, user.email)
+        else:
+            PAGES[page](repo)
+    except APIError as exc:
+        if exc.code != "42703":  # undefined column
+            raise
+        st.error("The database needs the Week 2 update. In Supabase, open SQL Editor and run "
+                 "supabase/migrations/20261025000000_preferences.sql, then reload.")
+
+
+PAGES = {
+    "Dashboard": _dashboard_page,
+    "Holdings": _holdings_page,
+    "Import": _import_page,
+    "Categories": _categories_page,
+    "Preferences": _preferences_page,
+    "Recommendations": _recommendations_page,
+    "Health check": _health_page,
+    "Profile": None,
+}
 
 
 main()

@@ -137,3 +137,24 @@ class FakeAuth:
 class FakeClient:
     def __init__(self, signed_in: bool = True):
         self.auth = FakeAuth(signed_in)
+
+
+class FakePriceStore:
+    """In-memory PriceStore that records what was saved."""
+
+    def __init__(self):
+        self.bars: dict[tuple[str, str], dict[date, PriceBar]] = {}
+        self.sync: dict[tuple[str, str], tuple[date, date, datetime]] = {}
+        self.saves: list[tuple[str, str, date, date]] = []
+
+    def get_sync(self, exchange, ticker):
+        return self.sync.get((exchange, ticker))
+
+    def get_bars(self, exchange, ticker, start, end):
+        bars = self.bars.get((exchange, ticker), {})
+        return [bars[d] for d in sorted(bars) if start <= d <= end]
+
+    def save(self, exchange, ticker, bars, first_day, last_day):
+        self.bars.setdefault((exchange, ticker), {}).update({b.day: b for b in bars})
+        self.sync[(exchange, ticker)] = (first_day, last_day, datetime.now(UTC))
+        self.saves.append((exchange, ticker, first_day, last_day))

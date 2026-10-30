@@ -13,7 +13,12 @@ Ian's private share and ETF recommender and portfolio dashboard.
   speculative: a small pot in high-growth themes such as AI, with guardrails on its size.
   Claude can explain a recommendation in plain English.
 
-Coming next: dashboard, health check and CSV import (Week 3), notifications (Week 4).
+- Week 3: a dashboard (value against money invested over time, breakdowns by goal,
+  platform, asset class, currency and holding, progress towards each goal), a health check
+  by goal, platform and portfolio (fixes are always top-ups, never sells), CSV import from
+  CommSec and CMC Markets exports with a preview, and a shared daily price cache in Supabase.
+
+Coming next: notifications (Week 4).
 
 ## Run it locally (VS Code)
 
@@ -59,6 +64,7 @@ share_recommender/
   data/       market data providers (Yahoo Finance first, pluggable)
   ai/         optional plain-English explanations from Claude
   recommendations.py   fetches prices, FX and dividend data, then runs the recommender
+  portfolio_service.py gathers data for the dashboard and health check
   db/         Supabase client and repository (row-level security does the per-user scoping)
   api/        FastAPI app for a future web / mobile front end
   ui/         Streamlit app

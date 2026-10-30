@@ -9,6 +9,7 @@ fundamentals are available to rank them.
 """
 
 from dataclasses import dataclass, field
+from decimal import Decimal
 from enum import StrEnum
 
 
@@ -59,6 +60,7 @@ class EtfStyle(StrEnum):
     SUSTAINABLE = "sustainable"  # screens out some industries; check its policy
     REGIONAL = "regional"      # one country's market, used only when nothing broader fits
     THEMATIC = "thematic"      # one high-growth theme; only for speculative goals
+    DIVERSIFIED = "diversified"  # a whole portfolio in one fund; recognised, never picked
 
 
 class Theme(StrEnum):
@@ -89,10 +91,16 @@ class Instrument:
     style: EtfStyle | None = None
     excluded_by: frozenset[Exclusion] = field(default_factory=frozenset)
     themes: frozenset[Theme] = field(default_factory=frozenset)
+    # For funds spread over several asset classes: fraction in each, adding up to 1.
+    split: tuple[tuple[AssetClass, Decimal], ...] = ()
 
     @property
     def key(self) -> tuple[str, str]:
         return (self.ticker, self.exchange)
+
+    @property
+    def mix(self) -> dict[AssetClass, Decimal]:
+        return dict(self.split) if self.split else {self.asset_class: Decimal(1)}
 
 
 def _etf(ticker, exchange, name, asset_class, style=EtfStyle.BROAD, theme=None) -> Instrument:
@@ -110,6 +118,13 @@ def _share(ticker, exchange, name, sector, *excluded_by: Exclusion,
 
 A, G, E, B, C = (AssetClass.AU_SHARES, AssetClass.GLOBAL_SHARES, AssetClass.EMERGING_SHARES,
                  AssetClass.BONDS, AssetClass.CASH)
+
+
+def _diversified(ticker, name, **split: str) -> Instrument:
+    mix = tuple((AssetClass(k), Decimal(v)) for k, v in split.items())
+    assert sum(v for _, v in mix) == 1, ticker
+    return Instrument(ticker, "ASX", name, Kind.ETF, max(mix, key=lambda kv: kv[1])[0],
+                      style=EtfStyle.DIVERSIFIED, split=mix)
 FOSSIL, TOBACCO, GAMBLING, WEAPONS, ALCOHOL = (Exclusion.FOSSIL_FUELS, Exclusion.TOBACCO,
                                                Exclusion.GAMBLING, Exclusion.WEAPONS,
                                                Exclusion.ALCOHOL)
@@ -163,6 +178,16 @@ ETFS: list[Instrument] = [
     _etf("ICLN", "NASDAQ", "iShares Global Clean Energy ETF", G, EtfStyle.THEMATIC,
          Theme.CLEAN_ENERGY),
     _etf("XBI", "NYSE", "SPDR S&P Biotech ETF", G, EtfStyle.THEMATIC, Theme.BIOTECH),
+    # Diversified "all in one" funds, split by their approximate target allocations. Fund
+    # managers adjust these from time to time, so the split is a close guide, not exact.
+    _diversified("DHHF", "Betashares Diversified All Growth ETF",
+                 au_shares="0.37", global_shares="0.55", emerging_shares="0.08"),
+    _diversified("VDHG", "Vanguard Diversified High Growth Index ETF",
+                 au_shares="0.36", global_shares="0.47", emerging_shares="0.07", bonds="0.10"),
+    _diversified("VDGR", "Vanguard Diversified Growth Index ETF",
+                 au_shares="0.28", global_shares="0.36", emerging_shares="0.06", bonds="0.30"),
+    _diversified("VDBA", "Vanguard Diversified Balanced Index ETF",
+                 au_shares="0.20", global_shares="0.26", emerging_shares="0.04", bonds="0.50"),
 ]
 
 SHARES: list[Instrument] = [
@@ -281,3 +306,21 @@ BY_KEY: dict[tuple[str, str], Instrument] = {i.key: i for i in UNIVERSE}
 
 def lookup(ticker: str, exchange: str) -> Instrument | None:
     return BY_KEY.get((ticker.upper(), exchange.upper()))
+
+
+def classify(ticker: str, exchange: str) -> dict[AssetClass, Decimal]:
+    """Fraction of a holding in each asset class.
+
+    Anything not on the list is assumed to be one company's shares: Australian on the ASX,
+    international elsewhere.
+    """
+    inst = lookup(ticker, exchange)
+    if inst:
+        return inst.mix
+    return {AssetClass.AU_SHARES if exchange.upper() == "ASX" else AssetClass.GLOBAL_SHARES:
+            Decimal(1)}
+
+
+def us_exchange(ticker: str) -> str:
+    """NASDAQ or NYSE for a US ticker, from the list; NYSE if it isn't on the list."""
+    return "NASDAQ" if lookup(ticker, "NASDAQ") else "NYSE"

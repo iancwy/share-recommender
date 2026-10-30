@@ -80,6 +80,18 @@ class YahooFinanceProvider(MarketDataProvider):
             return None
         return None if hist.empty else _decimal(hist["Close"].iloc[-1], 6)
 
+    def get_fx_history(self, base: str, quote: str, start: date, end: date) -> list[PriceBar]:
+        import yfinance as yf
+
+        symbol = f"{base}{quote}=X"
+        try:
+            hist = yf.Ticker(symbol).history(start=start, end=end + timedelta(days=1))
+        except Exception:
+            log.warning("Yahoo FX history failed for %s", symbol, exc_info=True)
+            return []
+        return [PriceBar(day=idx.date(), close=_decimal(row["Close"], 6))
+                for idx, row in hist.iterrows()]
+
     def get_fundamentals(self, ticker: str, exchange: str) -> Fundamentals | None:
         import yfinance as yf
 

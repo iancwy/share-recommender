@@ -4,6 +4,8 @@ Run locally with:  uvicorn share_recommender.api.main:app --reload
 Interactive docs:  http://127.0.0.1:8000/docs
 """
 
+from dataclasses import asdict
+from datetime import date, timedelta
 from decimal import Decimal
 from typing import Annotated
 from uuid import UUID
@@ -11,13 +13,17 @@ from uuid import UUID
 from fastapi import FastAPI, HTTPException, Query, Request, status
 from fastapi.responses import JSONResponse
 from postgrest.exceptions import APIError
+from pydantic import BaseModel
 
-from share_recommender.api.deps import MarketData, Repo
+from share_recommender.api.deps import MarketData, PriceStore, Repo
 from share_recommender.core.exchanges import EXCHANGES
+from share_recommender.core.importer import detect, parse_rows, read_csv
 from share_recommender.core.models import Category, CategoryIn, Holding, HoldingIn, Profile
 from share_recommender.core.preferences import CategoryPreferences, InvestorPreferences
 from share_recommender.core.recommender import Recommendation
 from share_recommender.data import Quote
+from share_recommender.data.history import CachedHistory
+from share_recommender.portfolio_service import health_report, portfolio_history
 from share_recommender.recommendations import build_recommendation, provider_fns
 
 app = FastAPI(title="Share Recommender API", version="0.1.0")
@@ -158,6 +164,68 @@ def get_recommendation(
         profile.base_currency if profile else "AUD", *provider_fns(market), amount=amount,
         all_holdings=all_holdings,
     )
+
+
+# Dashboard, health check and import ------------------------------------------
+
+def _base(repo) -> str:
+    profile = repo.get_profile()
+    return profile.base_currency if profile else "AUD"
+
+
+@app.get("/portfolio/history")
+def get_portfolio_history(
+    repo: Repo, market: MarketData, store: PriceStore,
+    days: Annotated[int | None, Query(gt=0, description="Days back; omit for all")] = None,
+) -> list[dict]:
+    """Portfolio value and money invested over time, in base currency."""
+    holdings = repo.list_holdings()
+    if not holdings:
+        return []
+    history = CachedHistory(market, store)
+
+    def fetch(symbols, currencies, base, start, end):
+        return ({s: history.history(*s, start, end) for s in symbols},
+                {c: history.fx_history(base, c, start, end) for c in currencies})
+
+    today = date.today()
+    first = min(h.buy_date for h in holdings)
+    start = max(first, today - timedelta(days=days)) if days else first
+    return [asdict(p) for p in portfolio_history(holdings, _base(repo), start, today, fetch)]
+
+
+@app.get("/health-check")
+def get_health_check(repo: Repo, market: MarketData) -> dict:
+    categories = repo.list_categories()
+    report = health_report(categories, repo.list_holdings(), repo.get_preferences(),
+                           {c.id: repo.get_category_preferences(c.id) for c in categories},
+                           _base(repo), *provider_fns(market))
+    return {"findings": [asdict(f) for f in report.findings],
+            "platforms": [asdict(p) | {"fees_pct": p.fees_pct} for p in report.platforms]}
+
+
+class ImportPreviewIn(BaseModel):
+    csv: str
+    platform: str | None = None
+    category_id: UUID | None = None
+    default_exchange: str = "ASX"
+
+
+@app.post("/holdings/import/preview")
+def preview_import(body: ImportPreviewIn, repo: Repo) -> dict:
+    """Parse a broker export without saving. POST each importable holding to /holdings."""
+    header, rows, header_line = read_csv(body.csv)
+    mapping = detect(header)
+    if missing := mapping.missing():
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT,
+                            f"Couldn't find columns for: {', '.join(missing)}")
+    parsed = parse_rows(rows, mapping, default_exchange=body.default_exchange.upper(),
+                        platform=body.platform, category_id=body.category_id,
+                        existing=repo.list_holdings(), header_line=header_line)
+    return {"layout": mapping.layout, "columns": mapping.columns, "rows": [
+        {"line": r.line, "side": r.side, "importable": r.importable, "duplicate": r.duplicate,
+         "problem": r.problem, "holding": r.holding.model_dump(mode="json") if r.holding else None}
+        for r in parsed]}
 
 
 # Market data ----------------------------------------------------------------

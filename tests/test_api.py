@@ -1,9 +1,9 @@
 import pytest
 from fastapi.testclient import TestClient
 
-from share_recommender.api.deps import get_market_data, get_repository
+from share_recommender.api.deps import get_market_data, get_price_store, get_repository
 from share_recommender.api.main import app
-from tests.fakes import FakeProvider, FakeRepository
+from tests.fakes import FakePriceStore, FakeProvider, FakeRepository
 
 
 @pytest.fixture
@@ -11,6 +11,7 @@ def client():
     repo = FakeRepository()
     app.dependency_overrides[get_repository] = lambda: repo
     app.dependency_overrides[get_market_data] = lambda: FakeProvider()
+    app.dependency_overrides[get_price_store] = lambda: FakePriceStore()
     yield TestClient(app)
     app.dependency_overrides.clear()
 
@@ -78,3 +79,25 @@ def test_preferences_and_recommendation(client):
 def test_rejects_bad_preferences(client):
     assert client.put("/preferences", json={"markets": ["MOON"]}).status_code == 422
     assert client.put("/preferences", json={"markets": []}).status_code == 422
+
+
+def test_dashboard_health_and_import_endpoints(client):
+    from tests.test_importer import COMMSEC
+
+    preview = client.post("/holdings/import/preview", json={"csv": COMMSEC,
+                                                            "platform": "CommSec"}).json()
+    assert preview["layout"] == "commsec"
+    buys = [r["holding"] for r in preview["rows"] if r["importable"]]
+    assert [h["ticker"] for h in buys] == ["VAS", "CBA"]
+    for h in buys:
+        assert client.post("/holdings", json=h).status_code == 201
+
+    history = client.get("/portfolio/history", params={"days": 30}).json()
+    assert history and set(history[0]) == {"day", "value", "invested"}
+
+    health = client.get("/health-check").json()
+    assert any("CBA" in f["title"] for f in health["findings"])
+    assert health["platforms"][0]["platform"] == "CommSec"
+
+    bad = client.post("/holdings/import/preview", json={"csv": "Date,Code\n01/01/2026,VAS\n"})
+    assert bad.status_code == 422

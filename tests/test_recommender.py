@@ -17,7 +17,6 @@ from share_recommender.core.preferences import (
     InvestorPreferences,
 )
 from share_recommender.core.recommender import (
-    OTHER,
     analyse_gaps,
     holding_values,
     plan_purchase,
@@ -156,18 +155,21 @@ def test_unfillable_slices_warn():
 
 def test_gaps_compare_holdings_with_target():
     mix = target_mix(_cat(), ETF_ONLY, CategoryPreferences(horizon_years=15), TODAY)
-    holdings = [_h("VAS", "ASX"), _h("MYSTERY", "ASX"), _h("VOO", "NYSE")]
+    holdings = [_h("VAS", "ASX"), _h("MYSTERY", "ASX"), _h("VOO", "NYSE"), _h("DHHF", "ASX")]
     provider = FakeProvider(price_everything=True)
     quotes = provider.get_quotes([(h.ticker, h.exchange) for h in holdings])
     values, notes = holding_values(holdings, quotes, {"USD": Decimal("0.5")}, "AUD")
     gaps = analyse_gaps(mix, values, "AUD", notes)
 
-    assert gaps.total_value == Decimal(4000)  # 1000 + 1000 + 1000 USD at 0.5
+    assert gaps.total_value == Decimal(5000)  # 1000 x 3 in AUD + 1000 USD at 0.5
     by_key = {g.key: g for g in gaps.slices}
-    assert by_key["au_shares"].current_value == 1000
-    assert by_key["global_shares"].current_value == 2000
-    assert by_key[OTHER].target_pct == 0 and by_key[OTHER].difference == -1000
+    # MYSTERY isn't on the list, so it counts as Australian shares; DHHF is split 37/55/8.
+    assert by_key["au_shares"].current_value == 2370
+    assert by_key["global_shares"].current_value == 2550
+    assert by_key["emerging_shares"].current_value == 80
     assert by_key["bonds"].difference == by_key["bonds"].target_value > 0
+    assert any("MYSTERY" in n for n in gaps.notes)
+    assert any("Diversified funds" in n for n in gaps.notes)
 
 
 def test_missing_price_counts_at_cost():

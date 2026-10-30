@@ -6,6 +6,7 @@ from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from share_recommender.data import MarketDataProvider, get_provider
+from share_recommender.db.price_store import SupabasePriceStore
 from share_recommender.db.repository import PortfolioRepository
 from share_recommender.db.supabase_client import user_client
 
@@ -26,5 +27,12 @@ def get_market_data() -> MarketDataProvider:
     return get_provider()
 
 
+def get_price_store(
+    creds: Annotated[HTTPAuthorizationCredentials | None, Depends(_bearer)],
+) -> SupabasePriceStore | None:
+    return SupabasePriceStore(user_client(creds.credentials)) if creds else None
+
+
 Repo = Annotated[PortfolioRepository, Depends(get_repository)]
 MarketData = Annotated[MarketDataProvider, Depends(get_market_data)]
+PriceStore = Annotated[SupabasePriceStore | None, Depends(get_price_store)]
