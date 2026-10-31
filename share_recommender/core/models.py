@@ -3,6 +3,7 @@
 from datetime import date, datetime
 from decimal import Decimal
 from enum import StrEnum
+from typing import Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -246,6 +247,9 @@ class ProfileIn(BaseModel):
     base_currency: str = Field(default="AUD", pattern=r"^[A-Z]{3}$")
     default_platform: str | None = Field(default=None, max_length=50,
                                          description="For new holdings and imports")
+    notify_email: bool = Field(default=True, description="Email new notifications")
+    notify_frequency: Literal["off", "daily", "weekly"] = Field(
+        default="weekly", description="Daily means weekdays; weekly means Mondays")
 
     @field_validator("display_name", "default_platform")
     @classmethod

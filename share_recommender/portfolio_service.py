@@ -76,6 +76,7 @@ def health_report(categories: list[Category], holdings: list[Holding],
     values = valued_holdings(holdings, base, quotes_fn, fx_fn)
     cash = valued_cash(list(cash_accounts), base, fx_fn)
     findings = check_portfolio(values, base, inv is not None, cash)
+    recommendations = {}
     for cat in categories:
         in_goal = [h for h in holdings if h.category_id == cat.id]
         goal_cash = [a for a in cash_accounts if a.category_id == cat.id]
@@ -86,9 +87,10 @@ def health_report(categories: list[Category], holdings: list[Holding],
         progress = goal_progress(cat, [v for v in values if v.holding.category_id == cat.id],
                                  today, [c for c in cash if c.account.category_id == cat.id])
         findings += check_goal(cat, rec, progress, base)
+        recommendations[cat.id] = rec
     summaries = platform_summaries(values, cash)
     findings += check_platforms(summaries)
-    return HealthReport(sort_findings(findings), summaries)
+    return HealthReport(sort_findings(findings), summaries, recommendations)
 
 
 def total(values: list[HoldingValue], cash: list[CashValue] = ()) -> tuple[Decimal, Decimal]:

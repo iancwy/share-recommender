@@ -411,3 +411,55 @@ def test_dividends_page(run_app, repo):
     assert not at.exception
     assert at.metric[3].label == "Dividends, last 12 months (AUD)"
     assert at.metric[3].value == "120"  # whole dollars
+
+
+def _note(title, read=False, minutes=0):
+    from uuid import uuid4
+
+    return {"id": str(uuid4()), "category_id": None, "kind": "health", "title": title,
+            "body": f"{title} body", "payload": {},
+            "created_at": f"2026-11-02T18:{minutes:02d}:00+11:00",
+            "read_at": "2026-11-02T19:00:00+11:00" if read else None, "emailed_at": None}
+
+
+def test_notifications_page(run_app, repo):
+    repo.notifications = [_note("Old news", read=True, minutes=1), _note("First", minutes=2),
+                          _note("Second", minutes=3)]
+    at = run_app()
+    radio = at.sidebar.radio[0]
+    assert "Notifications (2)" in radio.options  # the unread count shows in the menu
+    at.sidebar.radio[0].set_value("Notifications").run()
+    assert not at.exception
+    text = " ".join(m.value for m in at.markdown)
+    assert "Second" in text and text.index("Second") < text.index("First")  # newest first
+    assert text.count("**New**") == 2
+
+    first = next(n for n in repo.notifications if n["title"] == "First")
+    _button_by_key(at, f"read_{first['id']}").click().run()
+    assert first["read_at"] and repo.unread_count() == 1
+
+    _button(at, "Mark all 1 as read").click().run()
+    assert repo.unread_count() == 0
+
+    old = next(n for n in repo.notifications if n["title"] == "Old news")
+    _button_by_key(at, f"delete_note_{old['id']}").click().run()
+    assert [n["title"] for n in repo.notifications] == ["First", "Second"]
+
+    _button(at, "Check for changes now").click().run()
+    assert not at.exception
+    assert any("no earlier check" in i.value for i in at.info)
+
+
+def _button_by_key(at, key):
+    return next(b for b in at.button if b.key == key)
+
+
+def test_notification_settings_on_profile(run_app, repo):
+    at = run_app()
+    at.sidebar.radio[0].set_value("Profile").run()
+    at.selectbox(key="profile_frequency").set_value("daily")
+    at.checkbox(key="profile_email").uncheck()
+    _button(at, "Save").click().run()
+    assert not at.exception
+    assert (repo.profile.notify_frequency, repo.profile.notify_email) == ("daily", False)
+    assert repo.profile.display_name == "Ian"  # saving settings keeps the rest

@@ -4,6 +4,7 @@ The repository never filters by user id itself: row-level security in Postgres
 does that, so a bug here cannot leak one person's portfolio to another.
 """
 
+from datetime import datetime
 from typing import Any
 from uuid import UUID
 
@@ -21,6 +22,10 @@ from share_recommender.core.models import (
 )
 from share_recommender.core.preferences import CategoryPreferences, InvestorPreferences
 from supabase import Client
+
+
+def _now() -> str:
+    return datetime.now().astimezone().isoformat()
 
 
 def _payload(model: CategoryIn | HoldingIn | CashAccountIn | DividendIn) -> dict[str, Any]:
@@ -63,6 +68,32 @@ class PortfolioRepository:
             rows += (self._db.table("cash_accounts").update({"institution": new})
                      .eq("institution", old).execute().data)
         return len(rows)
+
+    # Notifications (created by the scheduled job; people can only read, mark read, delete)
+
+    def list_notifications(self, limit: int = 50) -> list[dict]:
+        return (self._db.table("notifications").select("*").order("created_at", desc=True)
+                .limit(limit).execute().data)
+
+    def unread_count(self) -> int:
+        return len(self._db.table("notifications").select("id").is_("read_at", "null")
+                   .execute().data)
+
+    def mark_notification_read(self, notification_id: str) -> None:
+        (self._db.table("notifications").update({"read_at": _now()})
+         .eq("id", notification_id).execute())
+
+    def mark_all_notifications_read(self) -> None:
+        (self._db.table("notifications").update({"read_at": _now()})
+         .is_("read_at", "null").execute())
+
+    def delete_notification(self, notification_id: str) -> None:
+        self._db.table("notifications").delete().eq("id", notification_id).execute()
+
+    def get_snapshots(self) -> dict[str, dict]:
+        """The job's last recommendation snapshots, for the 'check for changes' preview."""
+        rows = self._db.table("recommendation_snapshots").select("scope, payload").execute().data
+        return {r["scope"]: r["payload"] for r in rows}
 
     # Interview answers ---------------------------------------------------
     # An empty JSON object means the interview hasn't been done, returned as None.

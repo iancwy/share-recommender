@@ -5,9 +5,10 @@ never suggests selling, so it never triggers capital gains tax. The thresholds a
 constants so they're easy to change.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from decimal import Decimal
 from enum import StrEnum
+from uuid import UUID
 
 from share_recommender.core.models import Category
 from share_recommender.core.performance import CashValue, GoalProgress, HoldingValue
@@ -60,6 +61,8 @@ class PlatformSummary:
 class HealthReport:
     findings: list[Finding]
     platforms: list[PlatformSummary]
+    # Each goal's recommendation, built along the way (reused by the notification job).
+    recommendations: dict[UUID, Recommendation] = field(default_factory=dict)
 
     def count(self, severity: Severity) -> int:
         return sum(1 for f in self.findings if f.severity is severity)

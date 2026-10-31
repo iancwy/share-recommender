@@ -182,6 +182,23 @@ def get_recommendation(
     )
 
 
+# Notifications --------------------------------------------------------------
+
+@app.get("/notifications")
+def list_notifications(repo: Repo) -> list[dict]:
+    return repo.list_notifications()
+
+
+@app.post("/notifications/{notification_id}/read", status_code=status.HTTP_204_NO_CONTENT)
+def read_notification(notification_id: UUID, repo: Repo) -> None:
+    repo.mark_notification_read(str(notification_id))
+
+
+@app.delete("/notifications/{notification_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_notification(notification_id: UUID, repo: Repo) -> None:
+    repo.delete_notification(str(notification_id))
+
+
 # Dividends ------------------------------------------------------------------
 
 @app.get("/dividends", response_model=list[Dividend])

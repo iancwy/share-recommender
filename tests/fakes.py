@@ -33,6 +33,29 @@ class FakeRepository:
         self.dividends: dict[UUID, Dividend] = {}
         self.preferences: InvestorPreferences | None = None
         self.category_preferences: dict[UUID, CategoryPreferences] = {}
+        self.notifications: list[dict] = []
+        self.snapshots: dict[str, dict] = {}
+
+    def list_notifications(self, limit=50):
+        return sorted(self.notifications, key=lambda n: n["created_at"], reverse=True)[:limit]
+
+    def unread_count(self):
+        return sum(1 for n in self.notifications if not n.get("read_at"))
+
+    def mark_notification_read(self, notification_id):
+        for n in self.notifications:
+            if n["id"] == notification_id:
+                n["read_at"] = "2026-11-01T18:00:00+11:00"
+
+    def mark_all_notifications_read(self):
+        for n in self.notifications:
+            n["read_at"] = n.get("read_at") or "2026-11-01T18:00:00+11:00"
+
+    def delete_notification(self, notification_id):
+        self.notifications = [n for n in self.notifications if n["id"] != notification_id]
+
+    def get_snapshots(self):
+        return self.snapshots
 
     def list_dividends(self):
         return sorted(self.dividends.values(), key=lambda d: d.pay_date, reverse=True)

@@ -1,0 +1,22 @@
+# Tests and lint on every push and pull request. Uses the in-memory fakes, so no secrets.
+
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12", cache: pip }
+      - run: pip install -r requirements-dev.txt && pip install -e .
+      - run: ruff check .
+      - run: pytest

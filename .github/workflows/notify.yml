@@ -1,0 +1,42 @@
+# Notifications: runs after the ASX closes on weekdays, and by hand from the Actions tab
+# (leave "dry run" ticked to see what would be sent without sending or saving anything).
+# Secrets (Settings > Secrets and variables > Actions): see docs/notifications-setup.md.
+
+name: Notifications
+
+on:
+  schedule:
+    - cron: "0 7 * * 1-5"   # 07:00 UTC = 6pm Sydney in summer (AEDT), 5pm in winter; after ASX close
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Dry run (send nothing)"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: notifications
+  cancel-in-progress: false
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12", cache: pip }
+      - run: pip install -r requirements.txt && pip install -e .
+      - run: python -m share_recommender.jobs.notify ${{ inputs.dry_run && '--dry-run' || '' }}
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+          EMAIL_FROM: ${{ secrets.EMAIL_FROM }}
+          APP_URL: ${{ secrets.APP_URL }}

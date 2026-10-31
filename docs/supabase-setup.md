@@ -22,6 +22,9 @@
      holdings).
    - `20261101000300_dividends.sql`: dividends with franking credits (owner-only). Safe to
      run even if an earlier draft already created the table.
+   - `20261101000400_notifications.sql`: notification settings on `profiles`, the job's
+     `recommendation_snapshots`, and the in-app `notifications` inbox (people can only read,
+     mark read and delete their own). Then see [notifications-setup.md](notifications-setup.md).
 
    (If you prefer the Supabase CLI: `supabase link --project-ref <ref>` then `supabase db push`.)
 

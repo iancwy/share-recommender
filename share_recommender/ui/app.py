@@ -54,6 +54,7 @@ from share_recommender.data.history import CachedHistory
 from share_recommender.db.price_store import SupabasePriceStore
 from share_recommender.db.repository import PortfolioRepository
 from share_recommender.db.supabase_client import SupabaseNotConfigured, anon_client
+from share_recommender.notifier import build_notifications
 from share_recommender.portfolio_service import (
     health_report,
     portfolio_history,
@@ -1330,6 +1331,68 @@ def _dividends_page(repo: PortfolioRepository) -> None:
         st.rerun()
 
 
+# Notifications ----------------------------------------------------------------
+
+def _notifications_page(repo: PortfolioRepository) -> None:
+    st.caption("Updates about new or changed recommendations, new health check issues, big "
+               "price moves and goal deadlines. They're checked after the ASX closes, as often "
+               "as you choose on the Profile page.")
+    items = repo.list_notifications()
+    names = {str(c.id): c.name for c in repo.list_categories()}
+    unread = [n for n in items if not n.get("read_at")]
+    if unread and st.button(f"Mark all {len(unread)} as read"):
+        repo.mark_all_notifications_read()
+        st.rerun()
+    if not items:
+        st.info("No notifications yet. The first check after you sign up only records where "
+                "things stand; later checks tell you what changed.")
+    for n in items:
+        goal = names.get(str(n.get("category_id")), "Portfolio") if n.get("category_id") \
+            else "Portfolio"
+        when = pd.Timestamp(n["created_at"]).tz_convert(None)
+        with st.container(border=True):
+            new = "" if n.get("read_at") else "🔵 **New** · "
+            st.markdown(f"{new}**{goal}: {n['title']}**")
+            st.markdown(n["body"])
+            st.caption(f"{when:%d/%m/%Y %H:%M}" + (" · emailed" if n.get("emailed_at") else ""))
+            c1, c2 = st.columns(2)
+            if not n.get("read_at") and c1.button("Mark as read", key=f"read_{n['id']}"):
+                repo.mark_notification_read(n["id"])
+                st.rerun()
+            if c2.button("Delete", key=f"delete_note_{n['id']}"):
+                repo.delete_notification(n["id"])
+                st.rerun()
+
+    st.divider()
+    if st.button("Check for changes now",
+                 help="Compares your recommendations with the last check, without saving or "
+                      "emailing anything."):
+        _preview_changes(repo)
+
+
+def _preview_changes(repo: PortfolioRepository) -> None:
+    categories = repo.list_categories()
+    profile = repo.get_profile()
+    with st.spinner("Checking your recommendations…"):
+        outcome = build_notifications(
+            categories=categories,
+            goal_prefs={c.id: repo.get_category_preferences(c.id) for c in categories},
+            holdings=repo.list_holdings(), cash_accounts=repo.list_cash_accounts(),
+            inv=repo.get_preferences(), base=profile.base_currency if profile else "AUD",
+            old_snapshots=repo.get_snapshots(), quotes_fn=_quotes, fx_fn=_fx_rates,
+            fundamentals_fn=_fundamentals, history_fn=_history, today=date.today(),
+            weekly=bool(profile and profile.notify_frequency == "weekly"))
+    if outcome.baseline:
+        st.info("There's no earlier check to compare with yet. The first scheduled check will "
+                "record where things stand.")
+    elif not outcome.messages:
+        st.success("Nothing new since the last check.")
+    else:
+        st.markdown("**The next notification would say:**")
+        for m in outcome.messages:
+            st.markdown(f"- **{m.goal or 'Portfolio'}: {m.title}**: {m.body}")
+
+
 # Profile ----------------------------------------------------------------------
 # Profile ----------------------------------------------------------------------
 
@@ -1350,10 +1413,21 @@ def _profile_page(repo: PortfolioRepository, email: str) -> None:
             placeholder=FALLBACK_PLATFORM, max_chars=50, key="profile_default_platform",
             help=f"Preselected when you add or import holdings. Leave blank for "
                  f"{FALLBACK_PLATFORM}.")
+        st.markdown("**Notifications**")
+        frequencies = list(FREQUENCY_LABELS)
+        frequency = st.selectbox("How often", frequencies, key="profile_frequency",
+                                 index=frequencies.index(profile.notify_frequency),
+                                 format_func=FREQUENCY_LABELS.get,
+                                 help="Checked after the ASX closes. Off stops them entirely.")
+        notify_email = st.checkbox("Email me about new recommendations", key="profile_email",
+                                   value=profile.notify_email,
+                                   help="Otherwise they only appear on the Notifications page.")
         if st.form_submit_button("Save", type="primary"):
             try:
                 repo.update_profile(ProfileIn(display_name=name, base_currency=ccy,
-                                              default_platform=platform))
+                                              default_platform=platform,
+                                              notify_email=notify_email,
+                                              notify_frequency=frequency))
                 st.toast("Profile saved")
                 st.rerun()
             except ValidationError as exc:
@@ -1383,7 +1457,10 @@ def main() -> None:
             st.session_state.clear()
             st.rerun()
 
-        page = st.radio("Go to", list(PAGES), key="page")
+        unread = _unread(repo)
+        page = st.radio("Go to", list(PAGES), key="page",
+                        format_func=lambda p: f"{p} ({unread})" if p == "Notifications"
+                        and unread else p)
 
     st.title(page)
     try:
@@ -1398,6 +1475,16 @@ def main() -> None:
                  "supabase/migrations/20261025000000_preferences.sql, then reload.")
 
 
+FREQUENCY_LABELS = {"off": "Off", "daily": "Daily on weekdays", "weekly": "Weekly on Mondays"}
+
+
+def _unread(repo: PortfolioRepository) -> int:
+    try:
+        return repo.unread_count()
+    except APIError:  # the notifications migration hasn't been run yet
+        return 0
+
+
 PAGES = {
     "Dashboard": _dashboard_page,
     "Holdings": _holdings_page,
@@ -1408,6 +1495,7 @@ PAGES = {
     "Recommendations": _recommendations_page,
     "Dividends": _dividends_page,
     "Health check": _health_page,
+    "Notifications": _notifications_page,
     "Profile": None,
 }
 

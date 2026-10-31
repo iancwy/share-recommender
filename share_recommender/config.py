@@ -22,3 +22,27 @@ class Settings(BaseSettings):
 @lru_cache
 def get_settings() -> Settings:
     return Settings()
+
+
+class JobSettings(BaseSettings):
+    """Settings for the scheduled notification job only (GitHub Actions secrets).
+
+    Kept apart from ``Settings`` so the Streamlit app can never pick up the service key,
+    which bypasses row-level security.
+    """
+
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+
+    supabase_url: str = ""
+    supabase_service_role_key: str = ""
+    market_data_provider: str = "yahoo"
+    smtp_host: str = "smtp.gmail.com"
+    smtp_port: int = 587
+    smtp_user: str = ""
+    smtp_password: str = ""
+    email_from: str = ""
+    app_url: str = "http://localhost:8501"
+
+    @property
+    def email_configured(self) -> bool:
+        return bool(self.smtp_host and self.smtp_user and self.smtp_password)

@@ -132,3 +132,21 @@ def test_dividends(client):
     assert len(client.get("/dividends").json()) == 1
     assert client.delete(f"/dividends/{created.json()['id']}").status_code == 204
     assert client.post("/dividends", json=body | {"amount": "0"}).status_code == 422
+
+
+def test_notifications_endpoints(client):
+    from uuid import uuid4
+
+    repo = app.dependency_overrides[get_repository]()
+    note_id = str(uuid4())
+    repo.notifications = [{"id": note_id, "title": "t", "body": "b", "read_at": None,
+                           "created_at": "2026-11-02T18:00:00+11:00"}]
+    assert client.get("/notifications").json()[0]["id"] == note_id
+    assert client.post(f"/notifications/{note_id}/read").status_code == 204
+    assert repo.unread_count() == 0
+    assert client.delete(f"/notifications/{note_id}").status_code == 204
+    assert client.get("/notifications").json() == []
+
+    me = client.put("/me", json={"notify_frequency": "daily", "notify_email": False}).json()
+    assert (me["notify_frequency"], me["notify_email"]) == ("daily", False)
+    assert client.put("/me", json={"notify_frequency": "hourly"}).status_code == 422
