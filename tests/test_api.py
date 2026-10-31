@@ -122,3 +122,13 @@ def test_cash_accounts(client):
     assert client.post("/cash-accounts", json=body | {"balance": "-1"}).status_code == 422
     assert client.delete(f"/cash-accounts/{account_id}").status_code == 204
     assert client.get("/cash-accounts").json() == []
+
+
+def test_dividends(client):
+    body = {"ticker": "vas", "exchange": "ASX", "pay_date": "2026-07-15", "amount": "120.50",
+            "franking_credits": "30"}
+    created = client.post("/dividends", json=body)
+    assert created.status_code == 201 and created.json()["ticker"] == "VAS"
+    assert len(client.get("/dividends").json()) == 1
+    assert client.delete(f"/dividends/{created.json()['id']}").status_code == 204
+    assert client.post("/dividends", json=body | {"amount": "0"}).status_code == 422

@@ -23,6 +23,8 @@ from share_recommender.core.models import (
     CashAccountIn,
     Category,
     CategoryIn,
+    Dividend,
+    DividendIn,
     Holding,
     HoldingIn,
     Profile,
@@ -178,6 +180,23 @@ def get_recommendation(
         profile.base_currency if profile else "AUD", *provider_fns(market), amount=amount,
         all_holdings=all_holdings, cash_accounts=repo.list_cash_accounts(category_id),
     )
+
+
+# Dividends ------------------------------------------------------------------
+
+@app.get("/dividends", response_model=list[Dividend])
+def list_dividends(repo: Repo) -> list[Dividend]:
+    return repo.list_dividends()
+
+
+@app.post("/dividends", response_model=Dividend, status_code=status.HTTP_201_CREATED)
+def create_dividend(body: DividendIn, repo: Repo) -> Dividend:
+    return repo.create_dividend(body)
+
+
+@app.delete("/dividends/{dividend_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_dividend(dividend_id: UUID, repo: Repo) -> None:
+    repo.delete_dividend(dividend_id)
 
 
 # Cash accounts --------------------------------------------------------------

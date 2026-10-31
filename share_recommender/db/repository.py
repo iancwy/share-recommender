@@ -12,6 +12,8 @@ from share_recommender.core.models import (
     CashAccountIn,
     Category,
     CategoryIn,
+    Dividend,
+    DividendIn,
     Holding,
     HoldingIn,
     Profile,
@@ -21,7 +23,7 @@ from share_recommender.core.preferences import CategoryPreferences, InvestorPref
 from supabase import Client
 
 
-def _payload(model: CategoryIn | HoldingIn | CashAccountIn) -> dict[str, Any]:
+def _payload(model: CategoryIn | HoldingIn | CashAccountIn | DividendIn) -> dict[str, Any]:
     return model.model_dump(mode="json")
 
 
@@ -189,3 +191,16 @@ class PortfolioRepository:
 
     def delete_cash_account(self, account_id: UUID) -> None:
         self._db.table("cash_accounts").delete().eq("id", str(account_id)).execute()
+
+    # Dividends -----------------------------------------------------------
+
+    def list_dividends(self) -> list[Dividend]:
+        rows = self._db.table("dividends").select("*").order("pay_date", desc=True).execute().data
+        return [Dividend.model_validate(r) for r in rows]
+
+    def create_dividend(self, dividend: DividendIn) -> Dividend:
+        rows = self._db.table("dividends").insert(_payload(dividend)).execute().data
+        return Dividend.model_validate(rows[0])
+
+    def delete_dividend(self, dividend_id: UUID) -> None:
+        self._db.table("dividends").delete().eq("id", str(dividend_id)).execute()

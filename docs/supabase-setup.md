@@ -20,6 +20,8 @@
      holdings.
    - `20261101000200_cash_accounts.sql`: cash in savings accounts (owner-only, like
      holdings).
+   - `20261101000300_dividends.sql`: dividends with franking credits (owner-only). Safe to
+     run even if an earlier draft already created the table.
 
    (If you prefer the Supabase CLI: `supabase link --project-ref <ref>` then `supabase db push`.)
 

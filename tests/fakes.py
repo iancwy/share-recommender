@@ -11,6 +11,8 @@ from share_recommender.core.models import (
     CashAccountIn,
     Category,
     CategoryIn,
+    Dividend,
+    DividendIn,
     Holding,
     HoldingIn,
     Profile,
@@ -28,8 +30,20 @@ class FakeRepository:
         self.categories: dict[UUID, Category] = {general.id: general}
         self.holdings: dict[UUID, Holding] = {}
         self.cash: dict[UUID, CashAccount] = {}
+        self.dividends: dict[UUID, Dividend] = {}
         self.preferences: InvestorPreferences | None = None
         self.category_preferences: dict[UUID, CategoryPreferences] = {}
+
+    def list_dividends(self):
+        return sorted(self.dividends.values(), key=lambda d: d.pay_date, reverse=True)
+
+    def create_dividend(self, d: DividendIn):
+        dividend = Dividend(id=uuid4(), user_id=USER_ID, **d.model_dump())
+        self.dividends[dividend.id] = dividend
+        return dividend
+
+    def delete_dividend(self, dividend_id):
+        self.dividends.pop(dividend_id, None)
 
     def get_preferences(self):
         return self.preferences

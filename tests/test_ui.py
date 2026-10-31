@@ -1,5 +1,6 @@
 """Drive the Streamlit app headlessly with fake Supabase and market data."""
 
+from decimal import Decimal
 from pathlib import Path
 from unittest.mock import patch
 
@@ -388,3 +389,25 @@ def test_dashboard_counts_cash(run_app, repo):
     at = run_app()
     assert not at.exception
     assert at.metric[0].value == "15,000"  # 100 units at the fake price of 100, plus cash
+
+
+def test_dividends_page(run_app, repo):
+    _with_holdings(repo)
+    at = run_app()
+    at.sidebar.radio[0].set_value("Dividends").run()
+    assert not at.exception
+    assert any("No dividends recorded yet" in i.value for i in at.info)
+
+    next(s for s in at.selectbox if s.label == "Holding").set_value("VAS (ASX)")
+    next(n for n in at.number_input if n.label == "Amount paid").set_value(120.5)
+    next(n for n in at.number_input if n.label == "Franking credits").set_value(30.0)
+    _button(at, "Add dividend").click().run()
+    assert not at.exception
+    (d,) = repo.dividends.values()
+    assert (d.ticker, d.exchange, d.amount, d.franking_credits, d.platform) == \
+        ("VAS", "ASX", Decimal("120.5"), 30, "CMC Markets")
+
+    at.sidebar.radio[0].set_value("Dashboard").run()
+    assert not at.exception
+    assert at.metric[3].label == "Dividends, last 12 months (AUD)"
+    assert at.metric[3].value == "120"  # whole dollars

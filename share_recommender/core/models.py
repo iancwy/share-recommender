@@ -170,6 +170,72 @@ class CashAccount(CashAccountIn):
         return v
 
 
+class DividendIn(BaseModel):
+    """One dividend or distribution payment, in the exchange's currency."""
+
+    ticker: str = Field(min_length=1, max_length=20)
+    exchange: str
+    pay_date: date
+    amount: Decimal = Field(gt=0, description="Cash paid (or reinvested), before any tax")
+    franking_credits: Decimal = Field(default=Decimal("0"), ge=0)
+    withholding_tax: Decimal = Field(default=Decimal("0"), ge=0,
+                                     description="Foreign tax withheld, e.g. on US shares")
+    reinvested: bool = Field(default=False, description="Taken as new units (DRP)")
+    platform: str | None = Field(default=None, max_length=50)
+    notes: str | None = None
+
+    @field_validator("ticker")
+    @classmethod
+    def _normalise_ticker(cls, v: str) -> str:
+        v = v.strip().upper()
+        if not v:
+            raise ValueError("Ticker cannot be blank")
+        return v
+
+    @field_validator("exchange")
+    @classmethod
+    def _known_exchange(cls, v: str) -> str:
+        v = v.strip().upper()
+        if v not in EXCHANGES:
+            raise ValueError(f"Unknown exchange '{v}'. Known: {', '.join(EXCHANGES)}")
+        return v
+
+    @field_validator("platform", "notes")
+    @classmethod
+    def _blank_is_none(cls, v: str | None) -> str | None:
+        return v.strip() or None if v is not None else None
+
+    @field_validator("pay_date")
+    @classmethod
+    def _not_in_future(cls, v: date) -> date:
+        if v > date.today():
+            raise ValueError("Pay date cannot be in the future")
+        return v
+
+    @property
+    def currency(self) -> str:
+        return EXCHANGES[self.exchange].currency
+
+    @property
+    def grossed_up(self) -> Decimal:
+        """Cash plus franking credits: the amount that counts as taxable income."""
+        return self.amount + self.franking_credits
+
+
+class Dividend(DividendIn):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    user_id: UUID
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+    @field_validator("pay_date")
+    @classmethod
+    def _not_in_future(cls, v: date) -> date:
+        return v
+
+
 FALLBACK_PLATFORM = "CMC Markets"
 
 

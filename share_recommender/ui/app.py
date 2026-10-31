@@ -4,6 +4,7 @@ The UI only talks to the repository, core and data packages, so it can be
 replaced by a web or mobile front end on top of the FastAPI app later.
 """
 
+import re
 from datetime import date, timedelta
 from decimal import Decimal
 from uuid import UUID
@@ -30,12 +31,14 @@ from share_recommender.core.importer import (
     parse_rows,
     read_csv,
 )
+from share_recommender.core.income import by_financial_year, income_in_base
 from share_recommender.core.models import (
     FALLBACK_PLATFORM,
     CashAccount,
     CashAccountIn,
     Category,
     CategoryIn,
+    DividendIn,
     Holding,
     HoldingIn,
     ProfileIn,
@@ -929,14 +932,22 @@ def _dashboard_page(repo: PortfolioRepository) -> None:
     m2.metric(f"Money invested ({base})", f"{cost:,.0f}")
     m3.metric(f"Gain ({base})", f"{gain:,.0f}",
               delta=f"{gain / cost * 100:.1f}%" if cost else None)
-    m4.metric("Holdings", len(holdings))
+    today = date.today()
+    dividends = repo.list_dividends()
+    div_fx = _fx_rates(base, tuple(sorted({d.currency for d in dividends} - {base})))
+    year_income = income_in_base(dividends, div_fx, base, since=today - timedelta(days=365))
+    m4.metric(f"Dividends, last 12 months ({base})", f"{year_income:,.0f}")
+    if dividends and cost:
+        all_income = income_in_base(dividends, div_fx, base)
+        st.caption(f"Including all {all_income:,.0f} {base} of dividends recorded, your total "
+                   f"return is {gain + all_income:,.0f} {base} "
+                   f"({(gain + all_income) / cost * 100:.1f}% of money invested).")
     if any(not v.priced for v in values):
         st.caption("Some holdings have no current price and are counted at what you paid.")
 
     st.subheader("Value over time")
     period = st.radio("Period", list(PERIODS), index=2, horizontal=True, key="dash_period",
                       label_visibility="collapsed")
-    today = date.today()
     first_buy = min([h.buy_date for h in holdings] + [a.as_of for a in accounts])
     days = PERIODS[period]
     start = max(first_buy, today - timedelta(days=days)) if days else first_buy
@@ -1220,6 +1231,106 @@ def _import_page(repo: PortfolioRepository) -> None:
         st.rerun()
 
 
+# Dividends --------------------------------------------------------------------
+
+_HOLDING_OPTION = re.compile(r"^\s*([A-Za-z0-9.]+)\s*(?:\((\w+)\))?\s*$")
+
+
+def _dividend_form(holdings: list[Holding], platforms: list[str], default_platform: str
+                   ) -> DividendIn | None:
+    held = sorted({f"{h.ticker} ({h.exchange})" for h in holdings})
+    with st.form("add_dividend", clear_on_submit=True):
+        c1, c2, c3 = st.columns(3)
+        holding = c1.selectbox("Holding", held, index=None, accept_new_options=True,
+                               placeholder="Choose, or type a code like VAS (ASX)")
+        pay_date = c2.date_input("Pay date", value=date.today(), max_value=date.today(),
+                                 format="DD/MM/YYYY")
+        amount = c3.number_input("Amount paid", min_value=0.0, step=10.0, format="%.2f",
+                                 help="Cash before tax, in the holding's currency. For a "
+                                      "reinvested dividend, the amount reinvested.")
+        c4, c5, c6 = st.columns(3)
+        franking = c4.number_input("Franking credits", min_value=0.0, step=1.0, format="%.2f",
+                                   help="From the dividend statement. Australian shares only.")
+        withholding = c5.number_input("Foreign tax withheld", min_value=0.0, step=1.0,
+                                      format="%.2f", help="For example US tax on US shares.")
+        platform = _platform_input(c6, platforms, default_platform, "dividend_platform")
+        c7, c8 = st.columns([1, 2])
+        reinvested = c7.checkbox("Reinvested (DRP)",
+                                 help="If ticked, also add the new units on the Holdings page.")
+        notes = c8.text_input("Notes")
+        submitted = st.form_submit_button("Add dividend", type="primary")
+    if not submitted:
+        return None
+    m = _HOLDING_OPTION.match(holding or "")
+    if not m:
+        st.error("Choose a holding, or type a code like VAS (ASX).")
+        return None
+    try:
+        return DividendIn(
+            ticker=m.group(1), exchange=m.group(2) or get_settings().default_exchange,
+            pay_date=pay_date, amount=Decimal(str(amount)),
+            franking_credits=Decimal(str(franking)), withholding_tax=Decimal(str(withholding)),
+            reinvested=reinvested, platform=platform, notes=notes or None)
+    except ValidationError as exc:
+        _show_errors(exc)
+        return None
+
+
+def _dividends_page(repo: PortfolioRepository) -> None:
+    st.caption("Record dividends and distributions so your returns include income, not just "
+               "price changes. Totals are by Australian financial year (1 July to 30 June).")
+    holdings = repo.list_holdings()
+    profile = repo.get_profile()
+    default_platform = profile.platform_for_new if profile else FALLBACK_PLATFORM
+    platforms = _platform_options(holdings, default_platform)
+    st.subheader("Record a dividend")
+    new = _dividend_form(holdings, platforms, default_platform)
+    if new:
+        repo.create_dividend(new)
+        st.toast(f"Added {new.amount:,.2f} {new.currency} from {new.ticker}")
+        st.rerun()
+
+    dividends = repo.list_dividends()
+    if not dividends:
+        st.info("No dividends recorded yet.")
+        return
+
+    st.subheader("By financial year")
+    money = st.column_config.NumberColumn(format="%.2f")
+    st.dataframe(pd.DataFrame([
+        {"Financial year": y.year, "Ccy": y.currency, "Payments": y.payments,
+         "Cash": float(y.cash), "Franking credits": float(y.franking),
+         "Grossed up": float(y.grossed_up), "Foreign tax withheld": float(y.withholding),
+         "Reinvested": float(y.reinvested)}
+        for y in by_financial_year(dividends)
+    ]), hide_index=True, column_config={c: money for c in [
+        "Cash", "Franking credits", "Grossed up", "Foreign tax withheld", "Reinvested"]})
+    st.caption("Grossed up is cash plus franking credits, the amount that counts as income for "
+               "tax. Check figures against your statements; this isn't tax advice.")
+
+    st.subheader(f"Payments ({len(dividends)})")
+    event = st.dataframe(pd.DataFrame([
+        {"Pay date": d.pay_date, "Ticker": d.ticker, "Exchange": d.exchange,
+         "Amount": float(d.amount), "Ccy": d.currency, "Franking": float(d.franking_credits),
+         "Tax withheld": float(d.withholding_tax), "DRP": d.reinvested,
+         "Platform": d.platform or "", "Notes": d.notes or ""}
+        for d in dividends
+    ]), hide_index=True, on_select="rerun", selection_mode="single-row",
+        column_config={"Pay date": st.column_config.DateColumn(format="DD/MM/YYYY"),
+                       "Amount": money, "Franking": money, "Tax withheld": money})
+    if not event.selection.rows:
+        st.caption("Select a row to delete it.")
+        return
+    selected = dividends[event.selection.rows[0]]
+    confirm = st.checkbox(f"Yes, delete the {selected.ticker} dividend paid "
+                          f"{selected.pay_date:%d/%m/%Y}", key=f"del_div_ok_{selected.id}")
+    if st.button("Delete dividend", disabled=not confirm, key=f"del_div_{selected.id}"):
+        repo.delete_dividend(selected.id)
+        st.toast(f"Deleted {selected.ticker} dividend")
+        st.rerun()
+
+
+# Profile ----------------------------------------------------------------------
 # Profile ----------------------------------------------------------------------
 
 def _profile_page(repo: PortfolioRepository, email: str) -> None:
@@ -1295,6 +1406,7 @@ PAGES = {
     "Categories": _categories_page,
     "Preferences": _preferences_page,
     "Recommendations": _recommendations_page,
+    "Dividends": _dividends_page,
     "Health check": _health_page,
     "Profile": None,
 }
