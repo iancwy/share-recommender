@@ -483,3 +483,23 @@ def test_missing_migration_shows_a_friendly_message(run_app, repo):
     assert not at.exception
     assert any("missing an update" in e.value for e in at.error)
     assert at.session_state["unread"] == 0  # no unread count, and no crash
+
+
+def test_cloud_entry_point_runs_the_app(repo):
+    """streamlit_app.py (what Community Cloud runs) runs the real app on every rerun."""
+    root = Path(__file__).parents[1]
+    patches = [
+        patch("share_recommender.db.supabase_client.anon_client", return_value=FakeClient()),
+        patch("share_recommender.db.repository.PortfolioRepository", return_value=repo),
+        patch("share_recommender.data.get_provider", return_value=FakeProvider()),
+    ]
+    for p in patches:
+        p.start()
+    try:
+        at = AppTest.from_file(str(root / "streamlit_app.py"), default_timeout=30).run()
+        assert not at.exception and at.title[0].value == "Dashboard"
+        at.run()  # a rerun renders the page again, not a blank screen
+        assert not at.exception and at.title[0].value == "Dashboard"
+    finally:
+        for p in patches:
+            p.stop()
