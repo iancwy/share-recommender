@@ -18,6 +18,19 @@ def _button(at, label):
     return next(b for b in at.button if b.label == label)
 
 
+def _type_option(selectbox, text):
+    """Type a new value into a selectbox that accepts new options.
+
+    AppTest can only pick existing options, so send the typed text the way the browser does.
+    """
+    from streamlit.proto.WidgetStates_pb2 import WidgetState
+
+    state = WidgetState(id=selectbox.id, string_value=text)
+    selectbox.__class__ = type("TypedSelectbox", (type(selectbox),),
+                               {"_widget_state": property(lambda self: state)})
+    return selectbox
+
+
 @pytest.fixture
 def repo():
     return FakeRepository()
@@ -258,3 +271,67 @@ def test_import_snapshot_after_transaction_history(run_app, repo):
     vas = next(h for h in added if h.ticker == "VAS")
     assert vas.buy_price == Decimal("79.9")
     assert next(h for h in added if h.ticker == "MSFT").exchange == "NASDAQ"
+
+
+def test_typing_a_new_platform_on_add_and_edit(run_app, repo):
+    at = run_app()
+    at.sidebar.radio[0].set_value("Holdings").run()
+    # No default set: CMC Markets is preselected.
+    assert at.selectbox(key="add_holding_platform").value == "CMC Markets"
+    at.text_input[0].input("VAS")
+    at.number_input[0].set_value(10.0)
+    at.number_input[1].set_value(95.0)
+    _type_option(at.selectbox(key="add_holding_platform"), "Stake")
+    _button(at, "Add holding").click().run()
+    assert not at.exception
+    (holding,) = repo.holdings.values()
+    assert holding.platform == "Stake"
+
+    at = run_app()  # a fresh page, as after reloading
+    at.sidebar.radio[0].set_value("Holdings").run()
+    assert "Stake" in at.selectbox(key="add_holding_platform").options
+    at.selectbox(key="edit_holding").set_value(holding).run()
+    _type_option(at.selectbox(key=f"edit_{holding.id}_platform"), "Pearler")
+    _button(at, "Save changes").click().run()
+    assert not at.exception
+    assert repo.holdings[holding.id].platform == "Pearler"
+
+
+def test_default_platform_is_preselected(run_app, repo):
+    from share_recommender.core.models import ProfileIn
+
+    repo.update_profile(ProfileIn(display_name="Ian", default_platform="CommSec"))
+    at = run_app()
+    at.sidebar.radio[0].set_value("Holdings").run()
+    assert at.selectbox(key="add_holding_platform").value == "CommSec"
+    at.sidebar.radio[0].set_value("Import").run()
+    at.text_area(key="import_text_0").input(
+        "Date,Code,Quantity,Price\n01/02/2026,VGS,5,130\n").run()
+    assert at.selectbox(key="import_platform_0").value == "CommSec"
+
+
+def test_rename_a_platform(run_app, repo):
+    from datetime import date
+
+    for ticker, platform in [("VAS", "CMC Markets"), ("CBA", "CMC Markets"), ("NAB", "Stake")]:
+        repo.create_holding(HoldingIn(ticker=ticker, exchange="ASX", units=1, buy_price=100,
+                                      buy_date=date(2026, 1, 1), platform=platform))
+    at = run_app()
+    at.sidebar.radio[0].set_value("Holdings").run()
+    at.selectbox(key="rename_old").set_value("CMC Markets")
+    at.text_input(key="rename_new").input("CMC Invest")
+    at.checkbox(key="rename_confirm").check().run()
+    _button(at, "Rename platform").click().run()
+    assert not at.exception
+    assert sorted(h.platform for h in repo.holdings.values()) == [
+        "CMC Invest", "CMC Invest", "Stake"]
+
+
+def test_default_platform_on_profile_page(run_app, repo):
+    at = run_app()
+    at.sidebar.radio[0].set_value("Profile").run()
+    at.text_input(key="profile_default_platform").input("CommSec")
+    _button(at, "Save").click().run()
+    assert not at.exception
+    assert repo.profile.default_platform == "CommSec"
+    assert repo.profile.platform_for_new == "CommSec"

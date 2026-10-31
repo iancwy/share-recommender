@@ -18,7 +18,14 @@ from pydantic import BaseModel
 from share_recommender.api.deps import MarketData, PriceStore, Repo
 from share_recommender.core.exchanges import EXCHANGES
 from share_recommender.core.importer import detect, parse_rows, read_csv
-from share_recommender.core.models import Category, CategoryIn, Holding, HoldingIn, Profile
+from share_recommender.core.models import (
+    Category,
+    CategoryIn,
+    Holding,
+    HoldingIn,
+    Profile,
+    ProfileIn,
+)
 from share_recommender.core.preferences import CategoryPreferences, InvestorPreferences
 from share_recommender.core.recommender import Recommendation
 from share_recommender.data import Quote
@@ -58,6 +65,11 @@ def me(repo: Repo) -> Profile:
     if profile is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Profile not found")
     return profile
+
+
+@app.put("/me", response_model=Profile)
+def update_me(body: ProfileIn, repo: Repo) -> Profile:
+    return repo.update_profile(body)
 
 
 # Preferences interview ------------------------------------------------------

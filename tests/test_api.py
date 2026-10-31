@@ -101,3 +101,10 @@ def test_dashboard_health_and_import_endpoints(client):
 
     bad = client.post("/holdings/import/preview", json={"csv": "Date,Code\n01/01/2026,VAS\n"})
     assert bad.status_code == 422
+
+
+def test_update_me_with_default_platform(client):
+    r = client.put("/me", json={"display_name": "Ian", "base_currency": "AUD",
+                                "default_platform": " Stake "})
+    assert r.status_code == 200 and r.json()["default_platform"] == "Stake"
+    assert client.put("/me", json={"base_currency": "aud"}).status_code == 422

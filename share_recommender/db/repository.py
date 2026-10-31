@@ -7,7 +7,14 @@ does that, so a bug here cannot leak one person's portfolio to another.
 from typing import Any
 from uuid import UUID
 
-from share_recommender.core.models import Category, CategoryIn, Holding, HoldingIn, Profile
+from share_recommender.core.models import (
+    Category,
+    CategoryIn,
+    Holding,
+    HoldingIn,
+    Profile,
+    ProfileIn,
+)
 from share_recommender.core.preferences import CategoryPreferences, InvestorPreferences
 from supabase import Client
 
@@ -26,18 +33,25 @@ class PortfolioRepository:
         rows = self._db.table("profiles").select("*").limit(1).execute().data
         return Profile.model_validate(rows[0]) if rows else None
 
-    def update_profile(self, display_name: str | None, base_currency: str) -> Profile:
+    def update_profile(self, update: ProfileIn) -> Profile:
         profile = self.get_profile()
         if profile is None:
             raise LookupError("Profile not found")
         rows = (
             self._db.table("profiles")
-            .update({"display_name": display_name, "base_currency": base_currency})
+            .update(update.model_dump(mode="json"))
             .eq("id", str(profile.id))
             .execute()
             .data
         )
         return Profile.model_validate(rows[0])
+
+    def rename_platform(self, old: str, new: str | None) -> int:
+        """Move every holding on platform ``old`` to ``new``. Returns how many moved."""
+        new = (new or "").strip() or None
+        rows = (self._db.table("holdings").update({"platform": new}).eq("platform", old)
+                .execute().data)
+        return len(rows)
 
     # Interview answers ---------------------------------------------------
     # An empty JSON object means the interview hasn't been done, returned as None.

@@ -113,7 +113,26 @@ class Holding(HoldingIn):
         return v
 
 
-class Profile(BaseModel):
+FALLBACK_PLATFORM = "CMC Markets"
+
+
+class ProfileIn(BaseModel):
+    """Fields a person can change on their profile."""
+
+    display_name: str | None = Field(default=None, max_length=100)
+    base_currency: str = Field(default="AUD", pattern=r"^[A-Z]{3}$")
+    default_platform: str | None = Field(default=None, max_length=50,
+                                         description="For new holdings and imports")
+
+    @field_validator("display_name", "default_platform")
+    @classmethod
+    def _blank_is_none(cls, v: str | None) -> str | None:
+        return v.strip() or None if v is not None else None
+
+
+class Profile(ProfileIn):
     id: UUID
-    display_name: str | None = None
-    base_currency: str = "AUD"
+
+    @property
+    def platform_for_new(self) -> str:
+        return self.default_platform or FALLBACK_PLATFORM

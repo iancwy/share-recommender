@@ -43,9 +43,16 @@ class FakeRepository:
     def get_profile(self):
         return self.profile
 
-    def update_profile(self, display_name, base_currency):
-        self.profile = Profile(id=USER_ID, display_name=display_name, base_currency=base_currency)
+    def update_profile(self, update):
+        self.profile = Profile(id=USER_ID, **update.model_dump())
         return self.profile
+
+    def rename_platform(self, old, new):
+        new = (new or "").strip() or None
+        moved = [hid for hid, h in self.holdings.items() if h.platform == old]
+        for hid in moved:
+            self.holdings[hid] = self.holdings[hid].model_copy(update={"platform": new})
+        return len(moved)
 
     def list_categories(self):
         return sorted(self.categories.values(), key=lambda c: c.name)

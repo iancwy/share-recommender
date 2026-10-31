@@ -30,7 +30,15 @@ from share_recommender.core.importer import (
     parse_rows,
     read_csv,
 )
-from share_recommender.core.models import Category, CategoryIn, Holding, HoldingIn, RiskLevel
+from share_recommender.core.models import (
+    FALLBACK_PLATFORM,
+    Category,
+    CategoryIn,
+    Holding,
+    HoldingIn,
+    ProfileIn,
+    RiskLevel,
+)
 from share_recommender.core.performance import Dimension, breakdown, goal_progress
 from share_recommender.core.portfolio import UNCATEGORISED, totals_by_currency, value_holdings
 from share_recommender.core.preferences import CategoryPreferences, GoalStyle, InvestorPreferences
@@ -50,7 +58,6 @@ from share_recommender.portfolio_service import (
 from share_recommender.recommendations import build_recommendation
 from supabase import Client
 
-COMMON_PLATFORMS = ["CMC Markets"]
 DISCLAIMER = ("General information from a rules-based tool, not personal financial advice. "
               "Check any investment's fees and documents before you buy.")
 
@@ -125,15 +132,28 @@ def _fundamentals(symbols: tuple[tuple[str, str], ...]
 
 # Holdings ---------------------------------------------------------------------
 
+def _platform_options(holdings: list[Holding], default: str) -> list[str]:
+    """Platforms already used, plus the person's default."""
+    return sorted({h.platform for h in holdings if h.platform} | {default})
+
+
+def _platform_input(container, platforms: list[str], current: str | None, key: str):
+    return container.selectbox(
+        "Platform", platforms, key=key, accept_new_options=True,
+        index=platforms.index(current) if current in platforms else None,
+        placeholder="Choose or type any platform",
+        help="Type a new name to add it. Clear it for no platform.")
+
+
 def _holding_form(key: str, categories: list[Category], platforms: list[str],
-                  existing: Holding | None = None) -> HoldingIn | None:
+                  default_platform: str, existing: Holding | None = None) -> HoldingIn | None:
     """Render the add/edit form. Returns validated input when submitted, else None."""
     settings = get_settings()
     exchanges = list(EXCHANGES)
     cat_ids = [c.id for c in categories] + [None]
     cat_names = {c.id: c.name for c in categories} | {None: "Uncategorised"}
     default_exchange = existing.exchange if existing else settings.default_exchange.upper()
-    default_platform = existing.platform if existing else (platforms[0] if platforms else None)
+    current_platform = existing.platform if existing else default_platform
 
     with st.form(key, clear_on_submit=existing is None):
         c1, c2, c3 = st.columns(3)
@@ -159,11 +179,7 @@ def _holding_form(key: str, categories: list[Category], platforms: list[str],
         buy_date = c7.date_input("Buy date", value=existing.buy_date if existing else date.today(),
                                  max_value=date.today(), format="DD/MM/YYYY")
         c8, c9 = st.columns([1, 2])
-        platform = c8.selectbox(
-            "Platform", platforms,
-            index=platforms.index(default_platform) if default_platform in platforms else None,
-            accept_new_options=True, placeholder="Choose or type a platform",
-        )
+        platform = _platform_input(c8, platforms, current_platform, f"{key}_platform")
         notes = c9.text_input("Notes", value=(existing.notes or "") if existing else "")
         submitted = st.form_submit_button("Save changes" if existing else "Add holding",
                                           type="primary")
@@ -186,11 +202,13 @@ def _holding_form(key: str, categories: list[Category], platforms: list[str],
 def _holdings_page(repo: PortfolioRepository) -> None:
     categories = repo.list_categories()
     holdings = repo.list_holdings()
-    platforms = sorted({h.platform for h in holdings if h.platform} | set(COMMON_PLATFORMS))
+    profile = repo.get_profile()
+    default_platform = profile.platform_for_new if profile else FALLBACK_PLATFORM
+    platforms = _platform_options(holdings, default_platform)
 
     st.subheader("Add a holding")
     st.caption("Enter each purchase separately. Prices are in the exchange's currency.")
-    new = _holding_form("add_holding", categories, platforms)
+    new = _holding_form("add_holding", categories, platforms, default_platform)
     if new:
         repo.create_holding(new)
         st.toast(f"Added {new.units.normalize()} × {new.ticker}")
@@ -234,9 +252,8 @@ def _holdings_page(repo: PortfolioRepository) -> None:
         for v in valuations
     ])
     money = st.column_config.NumberColumn(format="%.2f")
-    event = st.dataframe(
+    st.dataframe(
         df, hide_index=True,
-        on_select="rerun", selection_mode="single-row",
         column_config={
             "Units": st.column_config.NumberColumn(format="%.4f"),
             "Buy price": money, "Fees": money, "Cost base": money, "Last price": money,
@@ -248,24 +265,41 @@ def _holdings_page(repo: PortfolioRepository) -> None:
     if any(v.last_price is None for v in valuations):
         st.caption("Blank prices mean the data provider has no price for that ticker and exchange.")
 
-    rows = event.selection.rows
-    if not rows:
-        st.caption("Select a row to edit or delete it.")
-        return
+    st.subheader("Edit or delete a holding")
+    selected = st.selectbox(
+        "Holding", holdings, index=None, key="edit_holding", placeholder="Choose a holding",
+        format_func=lambda h: f"{h.ticker} ({h.exchange}) · {h.units.normalize():,f} units · "
+                              f"bought {h.buy_date:%d/%m/%Y}" + (f" · {h.platform}"
+                                                                 if h.platform else ""))
+    if selected is not None:
+        updated = _holding_form(f"edit_{selected.id}", categories, platforms, default_platform,
+                                existing=selected)
+        if updated:
+            repo.update_holding(selected.id, updated)
+            st.toast(f"Updated {updated.ticker}")
+            st.rerun()
 
-    selected = holdings[rows[0]]
-    st.subheader(f"Edit {selected.ticker} bought {selected.buy_date:%d/%m/%Y}")
-    updated = _holding_form(f"edit_{selected.id}", categories, platforms, existing=selected)
-    if updated:
-        repo.update_holding(selected.id, updated)
-        st.toast(f"Updated {updated.ticker}")
-        st.rerun()
+        confirm = st.checkbox("Yes, I want to delete this holding", key=f"confirm_{selected.id}")
+        if st.button("Delete holding", disabled=not confirm, key=f"delete_{selected.id}"):
+            repo.delete_holding(selected.id)
+            st.toast(f"Deleted {selected.ticker}")
+            st.rerun()
 
-    confirm = st.checkbox("Yes, I want to delete this holding", key=f"confirm_{selected.id}")
-    if st.button("Delete holding", disabled=not confirm, key=f"delete_{selected.id}"):
-        repo.delete_holding(selected.id)
-        st.toast(f"Deleted {selected.ticker}")
-        st.rerun()
+    used = sorted({h.platform for h in holdings if h.platform})
+    if used:
+        with st.expander("Rename a platform"):
+            st.caption("Moves every holding on one platform to a new name, for example when a "
+                       "broker renames itself.")
+            c1, c2 = st.columns(2)
+            old = c1.selectbox("Platform", used, key="rename_old")
+            new_name = c2.text_input("New name", key="rename_new", max_chars=50)
+            count = sum(1 for h in holdings if h.platform == old)
+            confirm = st.checkbox(f"Yes, rename '{old}' on {count} holding(s)",
+                                  key="rename_confirm")
+            if st.button("Rename platform", disabled=not (confirm and new_name.strip())):
+                moved = repo.rename_platform(old, new_name)
+                st.toast(f"Moved {moved} holding(s) to {new_name.strip()}")
+                st.rerun()
 
 
 # Categories -------------------------------------------------------------------
@@ -931,13 +965,13 @@ def _import_page(repo: PortfolioRepository) -> None:
 
     categories = repo.list_categories()
     holdings = repo.list_holdings()
-    platforms = list(dict.fromkeys([Broker.COMMSEC.value, Broker.CMC.value]
-                                   + sorted({h.platform for h in holdings if h.platform})))
+    profile = repo.get_profile()
+    default_platform = profile.platform_for_new if profile else FALLBACK_PLATFORM
+    platforms = sorted(set(_platform_options(holdings, default_platform))
+                       | {Broker.COMMSEC.value, Broker.CMC.value})
     c1, c2, c3 = st.columns(3)
-    platform = c1.selectbox(
-        "Platform", platforms, accept_new_options=True, key=f"import_platform_{run}",
-        index=platforms.index(broker.value) if broker is not Broker.OTHER else None,
-        placeholder="Choose or type a platform")
+    platform = _platform_input(c1, platforms, broker.value if broker is not Broker.OTHER
+                               else default_platform, f"import_platform_{run}")
     goal_names = [c.name for c in categories] + [UNCATEGORISED]
     goal = c2.selectbox("Goal for these holdings", goal_names, key=f"import_goal_{run}",
                         help="You can change it row by row below.")
@@ -1078,10 +1112,19 @@ def _profile_page(repo: PortfolioRepository, email: str) -> None:
         ccy = st.selectbox("Base currency", currencies,
                            index=currencies.index(profile.base_currency)
                            if profile.base_currency in currencies else 0)
+        platform = st.text_input(
+            "Default platform for new holdings", value=profile.default_platform or "",
+            placeholder=FALLBACK_PLATFORM, max_chars=50, key="profile_default_platform",
+            help=f"Preselected when you add or import holdings. Leave blank for "
+                 f"{FALLBACK_PLATFORM}.")
         if st.form_submit_button("Save", type="primary"):
-            repo.update_profile(name or None, ccy)
-            st.toast("Profile saved")
-            st.rerun()
+            try:
+                repo.update_profile(ProfileIn(display_name=name, base_currency=ccy,
+                                              default_platform=platform))
+                st.toast("Profile saved")
+                st.rerun()
+            except ValidationError as exc:
+                _show_errors(exc)
 
 
 # Main -------------------------------------------------------------------------

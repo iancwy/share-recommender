@@ -15,6 +15,9 @@
    `profiles` and `categories` each have a `preferences` column. Week 3 adds
    `20261031000000_price_cache.sql`, which creates `price_history` and `price_sync`: a daily
    price cache shared by everyone who signs in (it holds market prices, not portfolios).
+   Week 4 adds, in this order:
+   - `20261101000100_default_platform.sql`: each person's default platform for new
+     holdings.
 
    (If you prefer the Supabase CLI: `supabase link --project-ref <ref>` then `supabase db push`.)
 
