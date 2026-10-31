@@ -13,14 +13,20 @@ from uuid import UUID
 
 from share_recommender.core.models import Category, Holding
 from share_recommender.core.portfolio import UNCATEGORISED
-from share_recommender.core.universe import ASSET_CLASS_LABELS, GROWTH_CLASSES, classify
+from share_recommender.core.universe import (
+    ASSET_CLASS_LABELS,
+    GROWTH_CLASSES,
+    Kind,
+    classify,
+    lookup,
+)
 from share_recommender.data.base import PriceBar, Quote
 
 CENT = Decimal("0.01")
 
 # Long-run return assumptions used only to project goals. Nominal, before fees and tax.
 # These are assumptions, not forecasts: real returns vary a lot from year to year.
-ASSUMED_RETURN = {"growth": Decimal("0.07"), "defensive": Decimal("0.035")}
+ASSUMED_RETURN = {"growth": Decimal("0.07"), "cash": Decimal("0.035")}
 
 
 # Value over time ----------------------------------------------------------------
@@ -119,6 +125,7 @@ def current_values(holdings: list[Holding], quotes: dict[tuple[str, str], Quote 
 class Dimension(StrEnum):
     GOAL = "Goal"
     PLATFORM = "Platform"
+    TYPE = "Type"
     ASSET_CLASS = "Asset class"
     CURRENCY = "Currency"
     HOLDING = "Holding"
@@ -148,6 +155,10 @@ def breakdown(values: list[HoldingValue], categories: list[Category], by: Dimens
                 return names.get(h.category_id, UNCATEGORISED) if h.category_id else UNCATEGORISED
             case Dimension.PLATFORM:
                 return h.platform or "No platform set"
+            case Dimension.TYPE:
+                inst = lookup(h.ticker, h.exchange)
+                # Anything not on the list is assumed to be a company's shares.
+                return "ETFs" if inst and inst.kind is Kind.ETF else "Shares"
             case Dimension.CURRENCY:
                 return h.currency
             case Dimension.HOLDING:
@@ -194,7 +205,7 @@ class GoalProgress:
 
 
 def assumed_return(values: list[HoldingValue]) -> Decimal:
-    """Blend of the growth and defensive assumptions, by the share held in shares."""
+    """Blend of the shares and cash assumptions, by the share held in shares."""
     total = sum((v.value for v in values), Decimal(0))
     if not total:
         return ASSUMED_RETURN["growth"]
@@ -202,7 +213,7 @@ def assumed_return(values: list[HoldingValue]) -> Decimal:
                   for ac, frac in classify(v.holding.ticker, v.holding.exchange).items()
                   if ac in GROWTH_CLASSES), Decimal(0)) / total
     return (growth * ASSUMED_RETURN["growth"]
-            + (1 - growth) * ASSUMED_RETURN["defensive"]).quantize(Decimal("0.0001"))
+            + (1 - growth) * ASSUMED_RETURN["cash"]).quantize(Decimal("0.0001"))
 
 
 def goal_progress(category: Category, values: list[HoldingValue], today: date) -> GoalProgress:

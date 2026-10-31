@@ -58,7 +58,7 @@ class Flexibility(StrEnum):
 
 
 class GoalStyle(StrEnum):
-    CORE = "core"                # a diversified mix of shares, bonds and cash
+    CORE = "core"                # a diversified mix of shares and cash
     SPECULATIVE = "speculative"  # a small pot all in high-growth themes
 
 

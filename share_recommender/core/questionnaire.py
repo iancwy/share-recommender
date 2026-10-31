@@ -94,7 +94,7 @@ GOAL: list[Question] = [
         Flexibility.NICE_TO_HAVE: "It's a nice-to-have; falling short is fine",
     }),
     Question("style", "What kind of goal is this?", "choice", {
-        GoalStyle.CORE: "An ordinary goal: a sensible mix of shares, bonds and cash",
+        GoalStyle.CORE: "An ordinary goal: a sensible mix of shares and cash",
         GoalStyle.SPECULATIVE: "Speculative: a small pot for high-growth, high-risk companies",
     }, help="Speculative goals are all in shares of fast-growing companies. Keep them to money "
             "you could afford to lose."),

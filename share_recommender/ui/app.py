@@ -604,7 +604,7 @@ def _recommendations_page(repo: PortfolioRepository) -> None:
         m2.metric("Investments", len(mix.picks))
     else:
         m1.metric("Shares (growth)", f"{mix.growth_pct}%")
-        m2.metric("Bonds and cash (defensive)", f"{100 - mix.growth_pct}%")
+        m2.metric("Cash (defensive)", f"{100 - mix.growth_pct}%")
     m3.metric("Time horizon", f"{mix.horizon_years:g} years")
     m4.metric(f"Held in this goal ({base})", f"{gaps.total_value:,.2f}")
     for w in mix.warnings:
@@ -833,8 +833,8 @@ def _dashboard_page(repo: PortfolioRepository) -> None:
                            f"{cat.target_date:%b %Y} at an assumed {p.assumed_return * 100:g}% "
                            f"a year. Adding about {p.monthly_needed:,.0f} {base} a month would "
                            "close the gap.")
-    st.caption("Projections assume steady returns of 7% a year for shares and 3.5% for bonds "
-               "and cash, before fees and tax. Real returns vary a lot from year to year; "
+    st.caption("Projections assume steady returns of 7% a year for shares and 3.5% for cash, "
+               "before fees and tax. Real returns vary a lot from year to year; "
                "this is an illustration, not a forecast.")
 
 

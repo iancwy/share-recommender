@@ -64,6 +64,8 @@ def test_breakdowns_and_other_bucket():
     assert platform == ["CMC Markets", "CommSec", "No platform set"]
     classes = {s.label for s in breakdown(values, [GOAL], Dimension.ASSET_CLASS)}
     assert classes == {"Australian shares", "Cash"}
+    types = {s.label: s.pct for s in breakdown(values, [GOAL], Dimension.TYPE)}
+    assert types == {"ETFs": 75, "Shares": 25}  # VAS and AAA are ETFs; CBA is a company
     folded = breakdown(values, [GOAL], Dimension.HOLDING, top=2)
     assert [s.label for s in folded] == ["VAS", "Other"] and folded[1].value == 1000
 

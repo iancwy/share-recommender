@@ -2,9 +2,9 @@
 
 For one goal category it works out:
 
-1. a **target mix**: how much in growth assets (shares) versus defensive assets (bonds,
-   cash), from the category's risk level and time horizon and the person's answers, then
-   split into asset classes;
+1. a **target mix**: how much in growth assets (shares) versus defensive assets (cash),
+   from the category's risk level and time horizon and the person's answers, then split
+   into asset classes;
 2. **picks**: an ETF for each slice, plus individual shares for part of the shares
    portion if the person wants them;
 3. **gaps**: what the category holds now against that mix;
@@ -189,8 +189,7 @@ def growth_percent(category: Category, inv: InvestorPreferences, prefs: Category
     return growth, reasons
 
 
-def asset_mix(growth: int, years: Decimal, inv: InvestorPreferences
-              ) -> tuple[list[Slice], list[str]]:
+def asset_mix(growth: int, inv: InvestorPreferences) -> tuple[list[Slice], list[str]]:
     g = Decimal(growth)
     reasons = []
     emerging = (g * EMERGING_SHARE_OF_GROWTH) if growth >= EMERGING_MIN_GROWTH else Decimal(0)
@@ -205,17 +204,13 @@ def asset_mix(growth: int, years: Decimal, inv: InvestorPreferences
                        f"{AU_SHARE_OF_DEVELOPED[inv.home_bias] * 100:g}% is Australian, from "
                        "your home-market preference.")
 
-    defensive = 100 - g
-    cash_fraction = Decimal(1) if years < 2 else Decimal("0.4") if years < 5 else Decimal("0.2")
-    cash = defensive * cash_fraction
-    bonds = defensive - cash
-    if defensive:
-        reasons.append("The defensive part is mostly cash when the money is needed soon, and "
-                       "mostly bonds for longer horizons.")
+    cash = 100 - g
+    if cash:
+        reasons.append("The defensive part is all cash, in high-interest savings or a cash ETF "
+                       "such as AAA or BILL, so it holds its value when shares fall.")
 
     raw = {AssetClass.AU_SHARES: au, AssetClass.GLOBAL_SHARES: global_,
-           AssetClass.EMERGING_SHARES: emerging, AssetClass.BONDS: bonds,
-           AssetClass.CASH: cash}
+           AssetClass.EMERGING_SHARES: emerging, AssetClass.CASH: cash}
     weights = _round_to_100({k: v for k, v in raw.items() if v > 0})
     slices = [Slice(asset_class=k, label=ASSET_CLASS_LABELS[k], weight=w)
               for k, w in weights.items()]
@@ -397,8 +392,8 @@ def speculative_mix(inv: InvestorPreferences, prefs: CategoryPreferences, years:
     themes = prefs.themes or [Theme.AI]
     names = ", ".join(THEME_LABELS[t] for t in themes)
     reasons = [
-        f"This is a speculative goal, so it is all in high-growth shares with no bonds or "
-        f"cash, focused on: {names}.",
+        f"This is a speculative goal, so it is all in high-growth shares with no cash, "
+        f"focused on: {names}.",
         "Expect big swings: companies like these can rise or fall by half in a year, and some "
         "fail. Only put money here you could lose without changing your plans.",
     ]
@@ -503,7 +498,7 @@ def target_mix(category: Category, inv: InvestorPreferences, prefs: CategoryPref
         warnings.append("The target date has passed, so everything is kept in cash. Update the "
                         "date if the goal is still running.")
     growth, reasons = growth_percent(category, inv, prefs, years)
-    slices, mix_reasons = asset_mix(growth, years, inv)
+    slices, mix_reasons = asset_mix(growth, inv)
     picks, pick_reasons, pick_warnings = select_picks(slices, inv, set(held), fundamentals or {})
     return TargetMix(growth_pct=growth, horizon_years=years, slices=slices, picks=picks,
                      reasons=reasons + mix_reasons + pick_reasons,

@@ -91,8 +91,9 @@ For one goal category:
    year, then at most 10% under 2 years, 30% under 3, 50% under 5, 70% under 7, 85% under 10.
    The horizon comes from the target date if set, otherwise the interview answer.
 2. **Asset classes.** Shares split into Australian, international and (from 60% shares)
-   10% emerging markets, using the home-market answer. Defensive splits into cash and
-   bonds: all cash under 2 years, 40% cash under 5, 20% cash beyond.
+   10% emerging markets, using the home-market answer. The defensive part is all cash
+   (high-interest savings or a cash ETF such as AAA or BILL): the app tracks shares, ETFs
+   and cash only.
 3. **Picks.** One ETF per slice from the curated list in `core/universe.py`: one already held
    in the category, else a sustainability-screened one if the person has exclusions, else an
    income one for income seekers, else the broadest on their chosen markets (ASX first). If
@@ -108,7 +109,7 @@ For one goal category:
 
 **Speculative goals** work differently. A goal is speculative when its interview answer says
 so, or, if it hasn't been answered, when the category is named "Speculative". It is all in
-shares, with no bonds or cash, invested in the themes chosen in the interview (AI and
+shares, with no cash, invested in the themes chosen in the interview (AI and
 semiconductors, cybersecurity, clean energy, biotech):
 
 - 30% across up to 2 theme ETFs (all ETFs, up to 3, for someone who chose "ETFs only"), and
@@ -132,7 +133,7 @@ never changes the numbers.
   that day's close (daily up to about 13 months, weekly beyond), converted at that day's
   exchange rate; money invested is cost including fees at the rate on the buy date.
   Breakdowns fold anything past the top 10 into "Other". Goal progress projects the current
-  value to the target date at an assumed 7% a year for shares and 3.5% for bonds and cash,
+  value to the target date at an assumed 7% a year for shares and 3.5% for cash,
   and works out the monthly top-up needed. These are illustrations, not forecasts.
 - **Health check** (`core/health.py`): per goal, drift from the target mix (warning at 5
   points, alert at 10), too much in shares within 2 years of a deadline, and on or behind
@@ -155,7 +156,8 @@ never changes the numbers.
 - **Classification**: holdings not on the curated list count as one company's shares
   (Australian on the ASX, international elsewhere). Diversified funds such as DHHF and VDHG
   are split across asset classes by their approximate target allocation, in the gaps, the
-  dashboard breakdown and the goal projections.
+  dashboard breakdown and the goal projections; VDHG's 10% fixed interest counts as cash.
+  The dashboard can also break holdings down by **type**: shares, ETFs and cash.
 
 ## Plan for later weeks
 

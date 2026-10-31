@@ -109,7 +109,7 @@ def check_goal(category: Category, rec: Recommendation, progress: GoalProgress,
                 f"The money is needed in about {progress.years_left:g} years, but {growth_now:g}% "
                 f"is in shares against a target of {rec.mix.growth_pct}%. A market fall now "
                 "would have little time to recover.",
-                "Put new money into the cash and bond picks until it's back on target."))
+                "Put new money into cash until it's back on target."))
 
     if progress.target is not None and progress.on_track is not None:
         if progress.on_track:
