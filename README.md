@@ -15,7 +15,7 @@ Ian's private share and ETF recommender and portfolio dashboard.
   platform, asset class, currency and holding, progress towards each goal), a health check
   by goal, platform and portfolio (fixes are always top-ups, never sells), CSV import from
   CommSec and CMC Markets exports with a preview, and a shared daily price cache in Supabase.
-- Week 4: shares, ETFs and cash only (no bonds); cash in high-interest savings accounts,
+- Week 4: shares, ETFs and cash only; cash in high-interest savings accounts,
   which counts in totals, fills each goal's cash slice and grows at its own rate; any
   platform name with a changeable default; dividends with franking credits; notifications
   about new or changed recommendations, in the app and by email, on each person's chosen

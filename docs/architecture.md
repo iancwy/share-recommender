@@ -170,7 +170,7 @@ never changes the numbers.
 
 ## Cash, notifications and deploy (Week 4)
 
-- **Shares, ETFs and cash only.** There's no bonds asset class. A goal's defensive part is
+- **Shares, ETFs and cash only.** That's all the app tracks. A goal's defensive part is
   all cash: savings accounts, or a cash ETF such as AAA or BILL. Dashboard breakdowns include
   "Type" (shares, ETFs, cash) alongside asset class.
 - **Platforms** are free text. Each person has a default for new holdings and imports

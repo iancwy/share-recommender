@@ -21,7 +21,7 @@ from share_recommender.ai.explain import explain
 from share_recommender.config import get_settings
 from share_recommender.core.category_templates import CATEGORY_TEMPLATES
 from share_recommender.core.exchanges import EXCHANGES
-from share_recommender.core.health import SEVERITY_ORDER, Severity
+from share_recommender.core.health import SEVERITY_ORDER
 from share_recommender.core.importer import (
     Broker,
     Layout,
@@ -63,7 +63,17 @@ from share_recommender.portfolio_service import (
     valued_holdings,
 )
 from share_recommender.recommendations import build_recommendation
+from share_recommender.ui.theme import PALETTE, SEVERITY_BADGE
 from supabase import Client
+
+
+def _metric_rows(items: list[tuple]) -> None:
+    """Metrics two to a row (2 x 2 rather than 4 across), so they're readable on a phone.
+
+    Each item is (label, value) or (label, value, delta)."""
+    for i in range(0, len(items), 2):
+        for col, item in zip(st.columns(2), items[i:i + 2], strict=False):
+            col.metric(*item)
 
 
 def _money(amount, currency: str, cents: bool = False) -> str:
@@ -74,7 +84,8 @@ def _money(amount, currency: str, cents: bool = False) -> str:
 DISCLAIMER = ("General information from a rules-based tool, not personal financial advice. "
               "Check any investment's fees and documents before you buy.")
 
-st.set_page_config(page_title="Share Recommender", page_icon="📈", layout="wide")
+st.set_page_config(page_title="Shares", page_icon="📈", layout="wide",
+                   initial_sidebar_state="collapsed")
 
 
 # Auth -------------------------------------------------------------------------
@@ -169,7 +180,7 @@ def _holding_form(key: str, categories: list[Category], platforms: list[str],
     current_platform = existing.platform if existing else default_platform
 
     with st.form(key, clear_on_submit=existing is None):
-        c1, c2, c3 = st.columns(3)
+        c1, c2 = st.columns(2)
         ticker = c1.text_input("Ticker", value=existing.ticker if existing else "",
                                placeholder="e.g. VAS")
         exchange = c2.selectbox(
@@ -177,23 +188,24 @@ def _holding_form(key: str, categories: list[Category], platforms: list[str],
             index=exchanges.index(default_exchange) if default_exchange in exchanges else 0,
             format_func=lambda code: f"{code} ({EXCHANGES[code].currency})",
         )
-        category_id = c3.selectbox(
+        c3, c4 = st.columns(2)
+        units = c3.number_input("Units", min_value=0.0, step=1.0, format="%.4f",
+                                value=float(existing.units) if existing else 0.0)
+        buy_price = c4.number_input("Buy price per unit", min_value=0.0, step=0.01, format="%.4f",
+                                    value=float(existing.buy_price) if existing else 0.0)
+        c5, c6 = st.columns(2)
+        fees = c5.number_input("Fees / brokerage", min_value=0.0, step=1.0, format="%.2f",
+                               value=float(existing.fees) if existing else 0.0)
+        buy_date = c6.date_input("Buy date", value=existing.buy_date if existing else date.today(),
+                                 max_value=date.today(), format="DD/MM/YYYY")
+        c7, c8 = st.columns(2)
+        category_id = c7.selectbox(
             "Category", cat_ids,
             index=cat_ids.index(existing.category_id) if existing else 0,
             format_func=lambda cid: cat_names[cid],
         )
-        c4, c5, c6, c7 = st.columns(4)
-        units = c4.number_input("Units", min_value=0.0, step=1.0, format="%.4f",
-                                value=float(existing.units) if existing else 0.0)
-        buy_price = c5.number_input("Buy price per unit", min_value=0.0, step=0.01, format="%.4f",
-                                    value=float(existing.buy_price) if existing else 0.0)
-        fees = c6.number_input("Fees / brokerage", min_value=0.0, step=1.0, format="%.2f",
-                               value=float(existing.fees) if existing else 0.0)
-        buy_date = c7.date_input("Buy date", value=existing.buy_date if existing else date.today(),
-                                 max_value=date.today(), format="DD/MM/YYYY")
-        c8, c9 = st.columns([1, 2])
         platform = _platform_input(c8, platforms, current_platform, f"{key}_platform")
-        notes = c9.text_input("Notes", value=(existing.notes or "") if existing else "")
+        notes = st.text_input("Notes", value=(existing.notes or "") if existing else "")
         submitted = st.form_submit_button("Save changes" if existing else "Add holding",
                                           type="primary")
 
@@ -266,16 +278,17 @@ def _holdings_page(repo: PortfolioRepository) -> None:
         for v in valuations
     ])
     money = st.column_config.NumberColumn(format="%.2f")
-    st.dataframe(
-        df, hide_index=True,
-        column_config={
-            "Units": st.column_config.NumberColumn(format="%.4f"),
-            "Buy price": money, "Fees": money, "Cost base": money, "Last price": money,
-            "Market value": money, "Gain": money,
-            "Gain %": st.column_config.NumberColumn(format="%.1f%%"),
-            "Buy date": st.column_config.DateColumn(format="DD/MM/YYYY"),
-        },
-    )
+    columns = {
+        "Units": st.column_config.NumberColumn(format="%.4f"),
+        "Buy price": money, "Fees": money, "Cost base": money, "Last price": money,
+        "Market value": money, "Gain": money,
+        "Gain %": st.column_config.NumberColumn(format="%.1f%%"),
+        "Buy date": st.column_config.DateColumn(format="DD/MM/YYYY"),
+    }
+    st.dataframe(df[["Ticker", "Units", "Market value", "Gain %"]], hide_index=True,
+                 column_config=columns)
+    with st.expander("All columns"):
+        st.dataframe(df, hide_index=True, column_config=columns)
 
     st.subheader("Edit or delete a holding")
     selected = st.selectbox(
@@ -390,16 +403,20 @@ def _cash_page(repo: PortfolioRepository) -> None:
         by_ccy[a.currency] = by_ccy.get(a.currency, Decimal(0)) + a.balance
     for col, (ccy, amount) in zip(st.columns(len(by_ccy)), by_ccy.items(), strict=True):
         col.metric(f"Total cash ({ccy})", _money(amount, ccy))
-    st.dataframe(pd.DataFrame([
+    df = pd.DataFrame([
         {"Bank or platform": a.institution, "Account": a.account_name or "",
          "Goal": names.get(a.category_id, UNCATEGORISED) if a.category_id else UNCATEGORISED,
          "Balance": float(a.balance), "Ccy": a.currency, "Rate (% a year)": float(a.interest_rate),
          "As at": a.as_of, "Notes": a.notes or ""}
         for a in accounts
-    ]), hide_index=True, column_config={
-        "Balance": st.column_config.NumberColumn(format="%.2f"),
-        "Rate (% a year)": st.column_config.NumberColumn(format="%.2f"),
-        "As at": st.column_config.DateColumn(format="DD/MM/YYYY")})
+    ])
+    columns = {"Balance": st.column_config.NumberColumn(format="%.2f"),
+               "Rate (% a year)": st.column_config.NumberColumn(format="%.2f"),
+               "As at": st.column_config.DateColumn(format="DD/MM/YYYY")}
+    st.dataframe(df[["Bank or platform", "Balance", "Rate (% a year)"]], hide_index=True,
+                 column_config=columns)
+    with st.expander("All columns"):
+        st.dataframe(df, hide_index=True, column_config=columns)
 
     st.subheader("Edit or delete a cash account")
     selected = st.selectbox("Cash account", accounts, index=None, key="edit_cash",
@@ -483,11 +500,12 @@ def _categories_page(repo: PortfolioRepository) -> None:
     existing_names = {c.name for c in categories}
     templates = [t for t in CATEGORY_TEMPLATES if t["name"] not in existing_names]
     if templates:
-        cols = st.columns(len(templates))
-        for col, t in zip(cols, templates, strict=True):
-            if col.button(f"＋ {t['name']}", key=f"tpl_{t['name']}", help=t["description"]):
-                repo.create_category(CategoryIn(**t))
-                st.rerun()
+        for i in range(0, len(templates), 2):
+            for col, t in zip(st.columns(2), templates[i:i + 2], strict=False):
+                if col.button(f"＋ {t['name']}", key=f"tpl_{t['name']}",
+                              help=t["description"], use_container_width=True):
+                    repo.create_category(CategoryIn(**t))
+                    st.rerun()
     st.caption("Or create your own:")
     new = _category_form("add_category")
     if new:
@@ -720,8 +738,8 @@ def _recommendations_page(repo: PortfolioRepository) -> None:
     inv = repo.get_preferences()
     if inv is None:
         st.info("Answer a few questions first so the recommendations fit you.")
-        st.button("Go to Preferences", type="primary",
-                  on_click=lambda: st.session_state.update(page="Preferences"))
+        if st.button("Go to Preferences", type="primary"):
+            st.switch_page(NAV["Preferences"])
         return
     categories = repo.list_categories()
     if not categories:
@@ -752,15 +770,11 @@ def _recommendations_page(repo: PortfolioRepository) -> None:
                                    cash_accounts=repo.list_cash_accounts(cat.id))
     mix, gaps = rec.mix, rec.gaps
 
-    m1, m2, m3, m4 = st.columns(4)
-    if mix.speculative:
-        m1.metric("Goal type", "Speculative")
-        m2.metric("Investments", len(mix.picks))
-    else:
-        m1.metric("Shares (growth)", f"{mix.growth_pct}%")
-        m2.metric("Cash (defensive)", f"{100 - mix.growth_pct}%")
-    m3.metric("Time horizon", f"{mix.horizon_years:g} years")
-    m4.metric("Held in this goal", _money(gaps.total_value, base))
+    first = ([("Goal type", "Speculative"), ("Investments", len(mix.picks))] if mix.speculative
+             else [("Shares (growth)", f"{mix.growth_pct}%"),
+                   ("Cash (defensive)", f"{100 - mix.growth_pct}%")])
+    _metric_rows(first + [("Time horizon", f"{mix.horizon_years:g} years"),
+                          ("Held in this goal", _money(gaps.total_value, base))])
     for w in mix.warnings:
         st.warning(w)
     notes = [n for n in (inv.notes, prefs.notes) if n]
@@ -838,16 +852,7 @@ def _recommendations_page(repo: PortfolioRepository) -> None:
 
 
 # Charts -----------------------------------------------------------------------
-# Colours from the dataviz reference palette, light and dark steps.
-
-PALETTE = {
-    "light": {"series": ["#2a78d6", "#eb6834"], "muted": "#898781", "grid": "#e1e0d9"},
-    "dark": {"series": ["#3987e5", "#d95926"], "muted": "#898781", "grid": "#2c2c2a"},
-}
-SEVERITY_BADGE = {
-    Severity.ALERT: "⛔ Alert", Severity.WARN: "⚠️ Warning",
-    Severity.INFO: "ℹ️ Info", Severity.OK: "✅ OK",
-}
+# Colours come from ui/theme.py, in light and dark steps.
 
 
 def _palette() -> dict:
@@ -890,7 +895,7 @@ def _bar_chart(slices: list, base: str) -> alt.Chart:
     df = pd.DataFrame([{"Label": s.label, "Value": float(s.value), "Share": float(s.pct),
                         "Share label": f"{s.pct:g}%"} for s in slices])
     order = list(df["Label"])
-    y = alt.Y("Label:N", sort=order, title=None, axis=alt.Axis(labelLimit=220, ticks=False))
+    y = alt.Y("Label:N", sort=order, title=None, axis=alt.Axis(labelLimit=140, ticks=False))
     bars = alt.Chart(df).mark_bar(color=pal["series"][0], cornerRadiusEnd=4, height=18).encode(
         x=alt.X("Value:Q", title=None, axis=alt.Axis(format=",.0f", gridColor=pal["grid"],
                                                      labelColor=pal["muted"], tickCount=4)),
@@ -933,15 +938,14 @@ def _dashboard_page(repo: PortfolioRepository) -> None:
     value, cost = total(values, cash)
     gain = value - cost  # cash counts in both, so it doesn't change the gain
 
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric("Portfolio value", _money(value, base))
-    m2.metric("Money invested", _money(cost, base))
-    m3.metric("Gain", _money(gain, base), delta=f"{gain / cost * 100:.1f}%" if cost else None)
     today = date.today()
     dividends = repo.list_dividends()
     div_fx = _fx_rates(base, tuple(sorted({d.currency for d in dividends} - {base})))
     year_income = income_in_base(dividends, div_fx, base, since=today - timedelta(days=365))
-    m4.metric("Dividends, last 12 months", _money(year_income, base))
+    _metric_rows([("Portfolio value", _money(value, base)),
+                  ("Money invested", _money(cost, base)),
+                  ("Gain", _money(gain, base), f"{gain / cost * 100:.1f}%" if cost else None),
+                  ("Dividends, last 12 months", _money(year_income, base))])
     if dividends and cost:
         all_income = income_in_base(dividends, div_fx, base)
         st.caption(f"Including all {_money(all_income, base)} of dividends recorded, your total "
@@ -1027,9 +1031,7 @@ def _health_page(repo: PortfolioRepository) -> None:
     st.caption("Checks each goal against its target mix and deadline, and the whole portfolio "
                "for concentration, fees and missing data. Fixes are always about where new "
                "money goes: nothing here suggests selling.")
-    cols = st.columns(4)
-    for col, sev in zip(cols, SEVERITY_ORDER, strict=True):
-        col.metric(SEVERITY_BADGE[sev], report.count(sev))
+    _metric_rows([(SEVERITY_BADGE[sev], report.count(sev)) for sev in SEVERITY_ORDER])
 
     areas = list(dict.fromkeys(["Portfolio"] + [c.name for c in categories]
                                + [p.platform for p in report.platforms]))
@@ -1048,12 +1050,15 @@ def _health_page(repo: PortfolioRepository) -> None:
                     st.caption(f"What to do: {f.action}")
 
     st.subheader("By platform")
-    st.dataframe(pd.DataFrame([
+    df = pd.DataFrame([
         {"Platform": p.platform, f"Value ({base})": float(p.value), "Share (%)": float(p.pct),
          "Holdings": p.holdings, f"Invested ({base})": float(p.invested),
          f"Brokerage paid ({base})": float(p.fees), "Brokerage (% of invested)": float(p.fees_pct)}
         for p in report.platforms
-    ]), hide_index=True)
+    ])
+    st.dataframe(df[["Platform", f"Value ({base})", "Share (%)"]], hide_index=True)
+    with st.expander("All columns"):
+        st.dataframe(df, hide_index=True)
 
 
 # Import -----------------------------------------------------------------------
@@ -1107,14 +1112,14 @@ def _import_page(repo: PortfolioRepository) -> None:
     default_platform = profile.platform_for_new if profile else FALLBACK_PLATFORM
     platforms = sorted(set(_platform_options(holdings, default_platform))
                        | {Broker.COMMSEC.value, Broker.CMC.value})
-    c1, c2, c3 = st.columns(3)
+    c1, c2 = st.columns(2)
     platform = _platform_input(c1, platforms, broker.value if broker is not Broker.OTHER
                                else default_platform, f"import_platform_{run}")
     goal_names = [c.name for c in categories] + [UNCATEGORISED]
     goal = c2.selectbox("Goal for these holdings", goal_names, key=f"import_goal_{run}",
                         help="You can change it row by row below.")
     exchanges = list(EXCHANGES)
-    default_exchange = c3.selectbox(
+    default_exchange = st.selectbox(
         "Exchange, when the file doesn't say", exchanges, key=f"import_exchange_{run}",
         index=exchanges.index(get_settings().default_exchange.upper())
         if get_settings().default_exchange.upper() in exchanges else 0)
@@ -1125,11 +1130,11 @@ def _import_page(repo: PortfolioRepository) -> None:
         layout = st.radio("Layout", layouts, index=layouts.index(mapping.layout),
                           key=f"import_layout_{run}", format_func=LAYOUT_NAMES.get)
         options = [NONE] + header
-        cols = st.columns(4)
+        cols = st.columns(2)
         chosen = {}
         for i, f in enumerate(LAYOUT_FIELDS[layout]):
             current = mapping.columns.get(f)
-            pick = cols[i % 4].selectbox(FIELD_NAMES.get(f, f.capitalize()), options,
+            pick = cols[i % 2].selectbox(FIELD_NAMES.get(f, f.capitalize()), options,
                                          key=f"import_col_{f}_{run}",
                                          index=options.index(current) if current in options
                                          else 0)
@@ -1245,24 +1250,24 @@ def _dividend_form(holdings: list[Holding], platforms: list[str], default_platfo
                    ) -> DividendIn | None:
     held = sorted({f"{h.ticker} ({h.exchange})" for h in holdings})
     with st.form("add_dividend", clear_on_submit=True):
-        c1, c2, c3 = st.columns(3)
+        c1, c2 = st.columns(2)
         holding = c1.selectbox("Holding", held, index=None, accept_new_options=True,
                                placeholder="Choose, or type a code like VAS (ASX)")
         pay_date = c2.date_input("Pay date", value=date.today(), max_value=date.today(),
                                  format="DD/MM/YYYY")
+        c3, c4 = st.columns(2)
         amount = c3.number_input("Amount paid", min_value=0.0, step=10.0, format="%.2f",
                                  help="Cash before tax, in the holding's currency. For a "
                                       "reinvested dividend, the amount reinvested.")
-        c4, c5, c6 = st.columns(3)
         franking = c4.number_input("Franking credits", min_value=0.0, step=1.0, format="%.2f",
                                    help="From the dividend statement. Australian shares only.")
+        c5, c6 = st.columns(2)
         withholding = c5.number_input("Foreign tax withheld", min_value=0.0, step=1.0,
                                       format="%.2f", help="For example US tax on US shares.")
         platform = _platform_input(c6, platforms, default_platform, "dividend_platform")
-        c7, c8 = st.columns([1, 2])
-        reinvested = c7.checkbox("Reinvested (DRP)",
+        reinvested = st.checkbox("Reinvested (DRP)",
                                  help="If ticked, also add the new units on the Holdings page.")
-        notes = c8.text_input("Notes")
+        notes = st.text_input("Notes")
         submitted = st.form_submit_button("Add dividend", type="primary")
     if not submitted:
         return None
@@ -1461,26 +1466,45 @@ def main() -> None:
             st.session_state.clear()
             st.rerun()
 
-        unread = _unread(repo)
-        page = st.radio("Go to", list(PAGES), key="page",
-                        format_func=lambda p: f"{p} ({unread})" if p == "Notifications"
-                        and unread else p)
+    unread = st.session_state["unread"] = _unread(repo)
+    NAV.clear()
+    for name, (icon, render) in PAGES.items():
+        title = f"{name} ({unread})" if name == "Notifications" and unread else name
+        NAV[name] = st.Page(_page(name, render, repo, user.email), title=title, icon=icon,
+                            url_path=name.lower().replace(" ", "-"),
+                            default=name == "Dashboard")
+    nav = st.navigation(list(NAV.values()), position="top")
+    # Tests choose a page through session state; people use the menu or the page's URL.
+    wanted = st.session_state.pop("nav_page", None)
+    if wanted and NAV[wanted] is not nav:
+        st.switch_page(NAV[wanted])
+    nav.run()
 
-    st.title(page)
-    try:
-        if page == "Profile":
-            _profile_page(repo, user.email)
-        else:
-            PAGES[page](repo)
-    except APIError as exc:
-        if exc.code not in MISSING_SCHEMA:
-            raise
-        st.error("The database is missing an update. Run any migrations in "
-                 "supabase/migrations/ you haven't run yet (see docs/supabase-setup.md), then "
-                 "reload.")
-    if page in FOOTER_PAGES:
-        st.divider()
-        st.caption(DISCLAIMER)
+
+NAV: dict = {}  # page name -> st.Page, rebuilt on every run
+
+
+def _page(name: str, render, repo: PortfolioRepository, email: str):
+    """A page for st.navigation: title, the page itself, friendly errors and the footer."""
+    def run() -> None:
+        st.title(name)
+        try:
+            if render is None:
+                _profile_page(repo, email)
+            else:
+                render(repo)
+        except APIError as exc:
+            if exc.code not in MISSING_SCHEMA:
+                raise
+            st.error("The database is missing an update. Run any migrations in "
+                     "supabase/migrations/ you haven't run yet (see docs/supabase-setup.md), "
+                     "then reload.")
+        if name in FOOTER_PAGES:
+            st.divider()
+            st.caption(DISCLAIMER)
+
+    run.__name__ = f"page_{name.lower().replace(' ', '_')}"
+    return run
 
 
 MISSING_SCHEMA = {"42703", "42P01", "PGRST204", "PGRST205"}  # a missing column or table
@@ -1508,18 +1532,18 @@ def _unread(repo: PortfolioRepository) -> int:
         return 0
 
 
-PAGES = {
-    "Dashboard": _dashboard_page,
-    "Holdings": _holdings_page,
-    "Cash": _cash_page,
-    "Import": _import_page,
-    "Categories": _categories_page,
-    "Preferences": _preferences_page,
-    "Recommendations": _recommendations_page,
-    "Dividends": _dividends_page,
-    "Health check": _health_page,
-    "Notifications": _notifications_page,
-    "Profile": None,
+PAGES = {  # name -> (icon, page function); Profile also needs the email
+    "Dashboard": (":material/dashboard:", _dashboard_page),
+    "Holdings": (":material/list_alt:", _holdings_page),
+    "Cash": (":material/savings:", _cash_page),
+    "Import": (":material/upload_file:", _import_page),
+    "Categories": (":material/category:", _categories_page),
+    "Preferences": (":material/tune:", _preferences_page),
+    "Recommendations": (":material/lightbulb:", _recommendations_page),
+    "Dividends": (":material/payments:", _dividends_page),
+    "Health check": (":material/health_and_safety:", _health_page),
+    "Notifications": (":material/notifications:", _notifications_page),
+    "Profile": (":material/person:", None),
 }
 
 

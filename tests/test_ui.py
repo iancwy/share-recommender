@@ -19,6 +19,12 @@ def _button(at, label):
     return next(b for b in at.button if b.label == label)
 
 
+def _go(at, page):
+    """Open a page, as choosing it from the menu along the top would."""
+    at.session_state["nav_page"] = page
+    return at
+
+
 def _type_option(selectbox, text):
     """Type a new value into a selectbox that accepts new options.
 
@@ -73,7 +79,7 @@ def test_login_screen_when_signed_out(run_app):
 def test_add_holding_and_value_it(run_app, repo):
     at = run_app()
     assert not at.exception
-    at.sidebar.radio[0].set_value("Holdings").run()
+    _go(at, "Holdings").run()
 
     at.text_input[0].input("vas")
     at.number_input[0].set_value(10.0)   # units
@@ -96,7 +102,7 @@ def test_add_holding_and_value_it(run_app, repo):
 
 def test_validation_errors_shown(run_app, repo):
     at = run_app()
-    at.sidebar.radio[0].set_value("Holdings").run()
+    _go(at, "Holdings").run()
     at.text_input[0].input("VAS")
     _button(at, "Add holding").click().run()  # units and price left at 0
     assert not repo.holdings
@@ -105,7 +111,7 @@ def test_validation_errors_shown(run_app, repo):
 
 def test_categories_page_adds_template(run_app, repo):
     at = run_app()
-    at.sidebar.radio[0].set_value("Categories").run()
+    _go(at, "Categories").run()
     assert not at.exception
     kids = next(b for b in at.button if "Kids private school" in b.label)
     kids.click().run()
@@ -114,7 +120,7 @@ def test_categories_page_adds_template(run_app, repo):
 
 def test_recommendations_need_the_interview_first(run_app):
     at = run_app()
-    at.sidebar.radio[0].set_value("Recommendations").run()
+    _go(at, "Recommendations").run()
     assert not at.exception
     _button(at, "Go to Preferences").click().run()
     assert at.title[0].value == "Preferences"
@@ -122,7 +128,7 @@ def test_recommendations_need_the_interview_first(run_app):
 
 def test_interview_then_recommendation(run_app, repo):
     at = run_app()
-    at.sidebar.radio[0].set_value("Preferences").run()
+    _go(at, "Preferences").run()
     assert not at.exception
     at.radio(key="q_direct_shares").set_value(DirectShares.ETF_ONLY)
     _button(at, "Save my answers").click().run()
@@ -133,7 +139,7 @@ def test_interview_then_recommendation(run_app, repo):
     _button(at, "Save").click().run()
     assert repo.category_preferences[cat.id].horizon_years == 15
 
-    at.sidebar.radio[0].set_value("Recommendations").run()
+    _go(at, "Recommendations").run()
     assert not at.exception
     assert at.metric[0].value == "70%"
     at.number_input(key="rec_amount").set_value(5000.0).run()
@@ -150,14 +156,14 @@ def test_speculative_goal_from_the_interview(run_app, repo):
     repo.preferences = InvestorPreferences()
     (cat,) = repo.categories.values()
     at = run_app()
-    at.sidebar.radio[0].set_value("Preferences").run()
+    _go(at, "Preferences").run()
     at.radio(key=f"q_style_{cat.id}").set_value(GoalStyle.SPECULATIVE)
     at.multiselect(key=f"q_themes_{cat.id}").set_value([Theme.AI, Theme.BIOTECH])
     _button(at, "Save").click().run()
     saved = repo.category_preferences[cat.id]
     assert saved.style is GoalStyle.SPECULATIVE and saved.themes == [Theme.AI, Theme.BIOTECH]
 
-    at.sidebar.radio[0].set_value("Recommendations").run()
+    _go(at, "Recommendations").run()
     assert not at.exception
     assert at.metric[0].value == "Speculative"
 
@@ -173,7 +179,7 @@ def test_chat_fills_the_questionnaire_for_review(run_app, repo):
     result = TurnResult("Got it. What markets?", draft, [])
 
     at = run_app()
-    at.sidebar.radio[0].set_value("Preferences").run()
+    _go(at, "Preferences").run()
     with patch("share_recommender.ai.interview.run_turn", return_value=result) as fake:
         at.chat_input(key="chat_input").set_value("I'm new and saving for a boat").run()
     assert not at.exception and fake.called
@@ -217,7 +223,7 @@ def test_dashboard(run_app, repo):
 def test_health_check_page(run_app, repo):
     _with_holdings(repo)
     at = run_app()
-    at.sidebar.radio[0].set_value("Health check").run()
+    _go(at, "Health check").run()
     assert not at.exception
     labels = [m.label for m in at.metric]
     assert labels == ["⛔ Alert", "⚠️ Warning", "ℹ️ Info", "✅ OK"]
@@ -229,7 +235,7 @@ def test_import_from_pasted_csv(run_app, repo):
     from tests.test_importer import COMMSEC
 
     at = run_app()
-    at.sidebar.radio[0].set_value("Import").run()
+    _go(at, "Import").run()
     assert not at.exception
     at.text_area(key="import_text_0").input(COMMSEC).run()
     assert not at.exception
@@ -257,7 +263,7 @@ def test_import_snapshot_after_transaction_history(run_app, repo):
     repo.create_holding(HoldingIn(ticker="VAS", exchange="ASX", units=200, buy_price=95,
                                   fees=10, buy_date=history_start, platform="CMC Markets"))
     at = run_app()
-    at.sidebar.radio[0].set_value("Import").run()
+    _go(at, "Import").run()
     at.text_area(key="import_text_0").input(SNAPSHOT).run()
     assert not at.exception
     # The date defaults to the earliest purchase already imported for CMC Markets.
@@ -276,7 +282,7 @@ def test_import_snapshot_after_transaction_history(run_app, repo):
 
 def test_typing_a_new_platform_on_add_and_edit(run_app, repo):
     at = run_app()
-    at.sidebar.radio[0].set_value("Holdings").run()
+    _go(at, "Holdings").run()
     # No default set: CMC Markets is preselected.
     assert at.selectbox(key="add_holding_platform").value == "CMC Markets"
     at.text_input[0].input("VAS")
@@ -289,7 +295,7 @@ def test_typing_a_new_platform_on_add_and_edit(run_app, repo):
     assert holding.platform == "Stake"
 
     at = run_app()  # a fresh page, as after reloading
-    at.sidebar.radio[0].set_value("Holdings").run()
+    _go(at, "Holdings").run()
     assert "Stake" in at.selectbox(key="add_holding_platform").options
     at.selectbox(key="edit_holding").set_value(holding).run()
     _type_option(at.selectbox(key=f"edit_{holding.id}_platform"), "Pearler")
@@ -303,9 +309,9 @@ def test_default_platform_is_preselected(run_app, repo):
 
     repo.update_profile(ProfileIn(display_name="Ian", default_platform="CommSec"))
     at = run_app()
-    at.sidebar.radio[0].set_value("Holdings").run()
+    _go(at, "Holdings").run()
     assert at.selectbox(key="add_holding_platform").value == "CommSec"
-    at.sidebar.radio[0].set_value("Import").run()
+    _go(at, "Import").run()
     at.text_area(key="import_text_0").input(
         "Date,Code,Quantity,Price\n01/02/2026,VGS,5,130\n").run()
     assert at.selectbox(key="import_platform_0").value == "CommSec"
@@ -318,7 +324,7 @@ def test_rename_a_platform(run_app, repo):
         repo.create_holding(HoldingIn(ticker=ticker, exchange="ASX", units=1, buy_price=100,
                                       buy_date=date(2026, 1, 1), platform=platform))
     at = run_app()
-    at.sidebar.radio[0].set_value("Holdings").run()
+    _go(at, "Holdings").run()
     at.selectbox(key="rename_old").set_value("CMC Markets")
     at.text_input(key="rename_new").input("CMC Invest")
     at.checkbox(key="rename_confirm").check().run()
@@ -330,7 +336,7 @@ def test_rename_a_platform(run_app, repo):
 
 def test_default_platform_on_profile_page(run_app, repo):
     at = run_app()
-    at.sidebar.radio[0].set_value("Profile").run()
+    _go(at, "Profile").run()
     at.text_input(key="profile_default_platform").input("CommSec")
     _button(at, "Save").click().run()
     assert not at.exception
@@ -341,7 +347,7 @@ def test_default_platform_on_profile_page(run_app, repo):
 def test_cash_page_add_edit_delete(run_app, repo):
     (cat,) = repo.categories.values()
     at = run_app()
-    at.sidebar.radio[0].set_value("Cash").run()
+    _go(at, "Cash").run()
     assert not at.exception
     assert any("No cash accounts yet" in i.value for i in at.info)
 
@@ -356,7 +362,7 @@ def test_cash_page_add_edit_delete(run_app, repo):
             account.category_id, account.currency) == ("ING", 5000, 5.5, cat.id, "AUD")
 
     at = run_app()
-    at.sidebar.radio[0].set_value("Cash").run()
+    _go(at, "Cash").run()
     assert at.metric[0].value == "5,000 AUD"
     at.selectbox(key="edit_cash").set_value(account).run()
     at.number_input(key=f"edit_cash_{account.id}_balance").set_value(6500.0)
@@ -365,7 +371,7 @@ def test_cash_page_add_edit_delete(run_app, repo):
     assert repo.cash[account.id].balance == 6500
 
     at = run_app()
-    at.sidebar.radio[0].set_value("Cash").run()
+    _go(at, "Cash").run()
     at.selectbox(key="edit_cash").set_value(repo.cash[account.id]).run()
     at.checkbox(key=f"confirm_cash_{account.id}").check().run()
     _button(at, "Delete cash account").click().run()
@@ -394,7 +400,7 @@ def test_dashboard_counts_cash(run_app, repo):
 def test_dividends_page(run_app, repo):
     _with_holdings(repo)
     at = run_app()
-    at.sidebar.radio[0].set_value("Dividends").run()
+    _go(at, "Dividends").run()
     assert not at.exception
     assert any("No dividends recorded yet" in i.value for i in at.info)
 
@@ -407,7 +413,7 @@ def test_dividends_page(run_app, repo):
     assert (d.ticker, d.exchange, d.amount, d.franking_credits, d.platform) == \
         ("VAS", "ASX", Decimal("120.5"), 30, "CMC Markets")
 
-    at.sidebar.radio[0].set_value("Dashboard").run()
+    _go(at, "Dashboard").run()
     assert not at.exception
     assert at.metric[3].label == "Dividends, last 12 months"
     assert at.metric[3].value == "120 AUD"  # whole dollars
@@ -426,9 +432,8 @@ def test_notifications_page(run_app, repo):
     repo.notifications = [_note("Old news", read=True, minutes=1), _note("First", minutes=2),
                           _note("Second", minutes=3)]
     at = run_app()
-    radio = at.sidebar.radio[0]
-    assert "Notifications (2)" in radio.options  # the unread count shows in the menu
-    at.sidebar.radio[0].set_value("Notifications").run()
+    assert at.session_state["unread"] == 2  # shown in the menu as "Notifications (2)"
+    _go(at, "Notifications").run()
     assert not at.exception
     text = " ".join(m.value for m in at.markdown)
     assert "Second" in text and text.index("Second") < text.index("First")  # newest first
@@ -456,7 +461,7 @@ def _button_by_key(at, key):
 
 def test_notification_settings_on_profile(run_app, repo):
     at = run_app()
-    at.sidebar.radio[0].set_value("Profile").run()
+    _go(at, "Profile").run()
     at.selectbox(key="profile_frequency").set_value("daily")
     at.checkbox(key="profile_email").uncheck()
     _button(at, "Save").click().run()
@@ -477,4 +482,4 @@ def test_missing_migration_shows_a_friendly_message(run_app, repo):
     at = run_app()  # the Dashboard reads cash accounts
     assert not at.exception
     assert any("missing an update" in e.value for e in at.error)
-    assert at.sidebar.radio[0].options[-2] == "Notifications"  # no unread count, no crash
+    assert at.session_state["unread"] == 0  # no unread count, and no crash

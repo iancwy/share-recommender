@@ -1,7 +1,7 @@
 # Runtime dependencies
 fastapi>=0.115
 uvicorn[standard]>=0.30
-streamlit>=1.45
+streamlit>=1.46
 supabase>=2.10
 pydantic>=2.8
 pydantic-settings>=2.4
