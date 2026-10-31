@@ -86,12 +86,12 @@ def test_add_holding_and_value_it(run_app, repo):
     assert holding.ticker == "VAS"
     assert holding.platform == "CMC Markets"
     assert holding.category_id is not None
-    assert at.metric[0].value == "1,000.00"  # 10 units at fake price 100
+    assert at.metric[0].value == "1,000 AUD"  # 10 units at fake price 100
 
     # Values refresh after a change (row selection itself can't be driven by AppTest).
     repo.update_holding(holding.id, HoldingIn(**holding.model_dump() | {"units": 12}))
     at.run()
-    assert at.metric[0].value == "1,200.00"
+    assert at.metric[0].value == "1,200 AUD"
 
 
 def test_validation_errors_shown(run_app, repo):
@@ -206,8 +206,8 @@ def test_dashboard(run_app, repo):
     at.run()
     assert not at.exception
     assert at.title[0].value == "Dashboard"
-    assert at.metric[0].label == "Portfolio value (AUD)"
-    assert at.metric[1].value == "1,350"  # 15 units at 90
+    assert at.metric[0].label == "Portfolio value"
+    assert at.metric[1].value == "1,350 AUD"  # 15 units at 90
     at.radio(key="dash_by").set_value(at.radio(key="dash_by").options[1]).run()  # platform
     assert not at.exception
     at.radio(key="dash_period").set_value("All").run()
@@ -357,7 +357,7 @@ def test_cash_page_add_edit_delete(run_app, repo):
 
     at = run_app()
     at.sidebar.radio[0].set_value("Cash").run()
-    assert at.metric[0].value == "5,000.00"
+    assert at.metric[0].value == "5,000 AUD"
     at.selectbox(key="edit_cash").set_value(account).run()
     at.number_input(key=f"edit_cash_{account.id}_balance").set_value(6500.0)
     _button(at, "Save changes").click().run()
@@ -388,7 +388,7 @@ def test_dashboard_counts_cash(run_app, repo):
                                            category_id=cat.id))
     at = run_app()
     assert not at.exception
-    assert at.metric[0].value == "15,000"  # 100 units at the fake price of 100, plus cash
+    assert at.metric[0].value == "15,000 AUD"  # 100 units at the fake price of 100, plus cash
 
 
 def test_dividends_page(run_app, repo):
@@ -409,8 +409,8 @@ def test_dividends_page(run_app, repo):
 
     at.sidebar.radio[0].set_value("Dashboard").run()
     assert not at.exception
-    assert at.metric[3].label == "Dividends, last 12 months (AUD)"
-    assert at.metric[3].value == "120"  # whole dollars
+    assert at.metric[3].label == "Dividends, last 12 months"
+    assert at.metric[3].value == "120 AUD"  # whole dollars
 
 
 def _note(title, read=False, minutes=0):
@@ -463,3 +463,18 @@ def test_notification_settings_on_profile(run_app, repo):
     assert not at.exception
     assert (repo.profile.notify_frequency, repo.profile.notify_email) == ("daily", False)
     assert repo.profile.display_name == "Ian"  # saving settings keeps the rest
+
+
+def test_missing_migration_shows_a_friendly_message(run_app, repo):
+    from postgrest.exceptions import APIError
+
+    def missing_table(*_, **__):
+        raise APIError({"code": "PGRST205", "message": "Could not find the table "
+                        "'public.cash_accounts' in the schema cache"})
+
+    repo.list_cash_accounts = missing_table
+    repo.unread_count = missing_table
+    at = run_app()  # the Dashboard reads cash accounts
+    assert not at.exception
+    assert any("missing an update" in e.value for e in at.error)
+    assert at.sidebar.radio[0].options[-2] == "Notifications"  # no unread count, no crash

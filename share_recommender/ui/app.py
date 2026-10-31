@@ -65,6 +65,12 @@ from share_recommender.portfolio_service import (
 from share_recommender.recommendations import build_recommendation
 from supabase import Client
 
+
+def _money(amount, currency: str, cents: bool = False) -> str:
+    """'15,000 AUD', or with cents for unit prices and small amounts: '9.95 AUD'."""
+    return f"{amount:,.2f} {currency}" if cents else f"{amount:,.0f} {currency}"
+
+
 DISCLAIMER = ("General information from a rules-based tool, not personal financial advice. "
               "Check any investment's fees and documents before you buy.")
 
@@ -236,8 +242,9 @@ def _holdings_page(repo: PortfolioRepository) -> None:
     totals = totals_by_currency(valuations)
     for col, (ccy, t) in zip(st.columns(len(totals)), totals.items(), strict=True):
         gain = t["market_value"] - t["priced_cost_base"]
-        col.metric(f"Market value ({ccy})", f"{t['market_value']:,.2f}",
-                   delta=f"{gain:,.2f}" if t["priced_cost_base"] else None)
+        col.metric(f"Market value ({ccy})", _money(t["market_value"], ccy),
+                   delta=_money(gain, ccy) if t["priced_cost_base"] else None)
+    _price_message([v.last_price is not None for v in valuations])
 
     df = pd.DataFrame([
         {
@@ -269,8 +276,6 @@ def _holdings_page(repo: PortfolioRepository) -> None:
             "Buy date": st.column_config.DateColumn(format="DD/MM/YYYY"),
         },
     )
-    if any(v.last_price is None for v in valuations):
-        st.caption("Blank prices mean the data provider has no price for that ticker and exchange.")
 
     st.subheader("Edit or delete a holding")
     selected = st.selectbox(
@@ -384,7 +389,7 @@ def _cash_page(repo: PortfolioRepository) -> None:
     for a in accounts:
         by_ccy[a.currency] = by_ccy.get(a.currency, Decimal(0)) + a.balance
     for col, (ccy, amount) in zip(st.columns(len(by_ccy)), by_ccy.items(), strict=True):
-        col.metric(f"Total cash ({ccy})", f"{amount:,.2f}")
+        col.metric(f"Total cash ({ccy})", _money(amount, ccy))
     st.dataframe(pd.DataFrame([
         {"Bank or platform": a.institution, "Account": a.account_name or "",
          "Goal": names.get(a.category_id, UNCATEGORISED) if a.category_id else UNCATEGORISED,
@@ -738,14 +743,14 @@ def _recommendations_page(repo: PortfolioRepository) -> None:
         prefs = CategoryPreferences()
 
     all_holdings = repo.list_holdings()
-    rec = build_recommendation(cat, inv, prefs,
-                               [h for h in all_holdings if h.category_id == cat.id], base,
-                               _quotes, _fx_rates, _fundamentals,
-                               amount=Decimal(str(amount)) if amount else None,
-                               all_holdings=all_holdings,
-                               cash_accounts=repo.list_cash_accounts(cat.id))
+    with st.spinner("Working out recommendations…"):
+        rec = build_recommendation(cat, inv, prefs,
+                                   [h for h in all_holdings if h.category_id == cat.id], base,
+                                   _quotes, _fx_rates, _fundamentals,
+                                   amount=Decimal(str(amount)) if amount else None,
+                                   all_holdings=all_holdings,
+                                   cash_accounts=repo.list_cash_accounts(cat.id))
     mix, gaps = rec.mix, rec.gaps
-    st.caption(DISCLAIMER)
 
     m1, m2, m3, m4 = st.columns(4)
     if mix.speculative:
@@ -755,7 +760,7 @@ def _recommendations_page(repo: PortfolioRepository) -> None:
         m1.metric("Shares (growth)", f"{mix.growth_pct}%")
         m2.metric("Cash (defensive)", f"{100 - mix.growth_pct}%")
     m3.metric("Time horizon", f"{mix.horizon_years:g} years")
-    m4.metric(f"Held in this goal ({base})", f"{gaps.total_value:,.2f}")
+    m4.metric("Held in this goal", _money(gaps.total_value, base))
     for w in mix.warnings:
         st.warning(w)
     notes = [n for n in (inv.notes, prefs.notes) if n]
@@ -798,7 +803,7 @@ def _recommendations_page(repo: PortfolioRepository) -> None:
 
     plan = rec.buy_plan
     if plan:
-        st.subheader(f"What to buy with {plan.amount:,.2f} {base}")
+        st.subheader(f"What to buy with {_money(plan.amount, base)}")
         if plan.orders:
             st.dataframe(pd.DataFrame([
                 {"Ticker": o.ticker, "Exchange": o.exchange, "Name": o.name, "Units": o.units,
@@ -807,11 +812,11 @@ def _recommendations_page(repo: PortfolioRepository) -> None:
                 for o in plan.orders
             ]), hide_index=True, column_config={"Price": st.column_config.NumberColumn(
                 format="%.2f")})
-            st.caption(f"Left over: {plan.leftover:,.2f} {base}. Prices are the latest "
-                       "available and will move before you trade.")
+            st.caption(f"Left over: {_money(plan.leftover, base, cents=True)}. Prices are the "
+                       "latest available and will move before you trade.")
         for t in plan.cash_topups:
             account = f"{t.institution} {t.account_name}" if t.account_name else t.institution
-            st.markdown(f"**Add {t.amount:,.0f} {base} to {account}** "
+            st.markdown(f"**Add {_money(t.amount, base)} to {account}** "
                         f"({t.interest_rate:g}% a year)")
         for note in plan.notes:
             st.caption(note)
@@ -929,22 +934,20 @@ def _dashboard_page(repo: PortfolioRepository) -> None:
     gain = value - cost  # cash counts in both, so it doesn't change the gain
 
     m1, m2, m3, m4 = st.columns(4)
-    m1.metric(f"Portfolio value ({base})", f"{value:,.0f}")
-    m2.metric(f"Money invested ({base})", f"{cost:,.0f}")
-    m3.metric(f"Gain ({base})", f"{gain:,.0f}",
-              delta=f"{gain / cost * 100:.1f}%" if cost else None)
+    m1.metric("Portfolio value", _money(value, base))
+    m2.metric("Money invested", _money(cost, base))
+    m3.metric("Gain", _money(gain, base), delta=f"{gain / cost * 100:.1f}%" if cost else None)
     today = date.today()
     dividends = repo.list_dividends()
     div_fx = _fx_rates(base, tuple(sorted({d.currency for d in dividends} - {base})))
     year_income = income_in_base(dividends, div_fx, base, since=today - timedelta(days=365))
-    m4.metric(f"Dividends, last 12 months ({base})", f"{year_income:,.0f}")
+    m4.metric("Dividends, last 12 months", _money(year_income, base))
     if dividends and cost:
         all_income = income_in_base(dividends, div_fx, base)
-        st.caption(f"Including all {all_income:,.0f} {base} of dividends recorded, your total "
-                   f"return is {gain + all_income:,.0f} {base} "
+        st.caption(f"Including all {_money(all_income, base)} of dividends recorded, your total "
+                   f"return is {_money(gain + all_income, base)} "
                    f"({(gain + all_income) / cost * 100:.1f}% of money invested).")
-    if any(not v.priced for v in values):
-        st.caption("Some holdings have no current price and are counted at what you paid.")
+    _price_message([v.priced for v in values])
 
     st.subheader("Value over time")
     period = st.radio("Period", list(PERIODS), index=2, horizontal=True, key="dash_period",
@@ -985,20 +988,20 @@ def _dashboard_page(repo: PortfolioRepository) -> None:
             st.markdown(f"**{cat.name}**")
             if p.target:
                 st.progress(min(float(p.value / p.target), 1.0),
-                            text=f"{p.value:,.0f} of {p.target:,.0f} {base} "
+                            text=f"{_money(p.value, base)} of {_money(p.target, base)} "
                                  f"({p.pct_of_target:g}%)")
             else:
-                st.markdown(f"{p.value:,.0f} {base}. Set a target amount on the Categories page "
-                            "to track progress.")
+                st.markdown(f"{_money(p.value, base)}. Set a target amount on the Categories "
+                            "page to track progress.")
             if p.on_track is True:
-                st.caption(f"✅ On track: about {p.projected:,.0f} {base} by "
+                st.caption(f"✅ On track: about {_money(p.projected, base)} by "
                            f"{cat.target_date:%b %Y} at an assumed "
                            f"{p.assumed_return * 100:g}% a year.")
             elif p.on_track is False:
-                st.caption(f"⚠️ Behind: about {p.projected:,.0f} {base} by "
+                st.caption(f"⚠️ Behind: about {_money(p.projected, base)} by "
                            f"{cat.target_date:%b %Y} at an assumed {p.assumed_return * 100:g}% "
-                           f"a year. Adding about {p.monthly_needed:,.0f} {base} a month would "
-                           "close the gap.")
+                           f"a year. Adding about {_money(p.monthly_needed, base)} a month "
+                           "would close the gap.")
     st.caption("Projections assume steady returns of 7% a year for shares and 3.5% for cash "
                "funds, with savings accounts at their own interest rate, before fees and tax. "
                "Real returns vary a lot from year to year; this is an illustration, not a "
@@ -1017,8 +1020,9 @@ def _health_page(repo: PortfolioRepository) -> None:
     profile = repo.get_profile()
     base = profile.base_currency if profile else "AUD"
     goal_prefs = {c.id: repo.get_category_preferences(c.id) for c in categories}
-    report = health_report(categories, holdings, repo.get_preferences(), goal_prefs, base,
-                           _quotes, _fx_rates, _fundamentals, cash_accounts=accounts)
+    with st.spinner("Running the health check…"):
+        report = health_report(categories, holdings, repo.get_preferences(), goal_prefs, base,
+                               _quotes, _fx_rates, _fundamentals, cash_accounts=accounts)
 
     st.caption("Checks each goal against its target mix and deadline, and the whole portfolio "
                "for concentration, fees and missing data. Fixes are always about where new "
@@ -1469,10 +1473,29 @@ def main() -> None:
         else:
             PAGES[page](repo)
     except APIError as exc:
-        if exc.code != "42703":  # undefined column
+        if exc.code not in MISSING_SCHEMA:
             raise
-        st.error("The database needs the Week 2 update. In Supabase, open SQL Editor and run "
-                 "supabase/migrations/20261025000000_preferences.sql, then reload.")
+        st.error("The database is missing an update. Run any migrations in "
+                 "supabase/migrations/ you haven't run yet (see docs/supabase-setup.md), then "
+                 "reload.")
+    if page in FOOTER_PAGES:
+        st.divider()
+        st.caption(DISCLAIMER)
+
+
+MISSING_SCHEMA = {"42703", "42P01", "PGRST204", "PGRST205"}  # a missing column or table
+FOOTER_PAGES = {"Dashboard", "Recommendations", "Health check", "Notifications"}
+
+
+def _price_message(priced: list[bool]) -> None:
+    """Say so when prices are missing, rather than showing blanks without a reason."""
+    if priced and not any(priced):
+        st.warning("Couldn't get any prices from Yahoo Finance just now, so holdings are shown "
+                   "at what you paid. Try ↻ Refresh prices on the Holdings page in a few "
+                   "minutes.")
+    elif not all(priced):
+        st.caption("Some holdings have no current price, so they're counted at what you paid. "
+                   "Check the ticker and exchange if it doesn't come back.")
 
 
 FREQUENCY_LABELS = {"off": "Off", "daily": "Daily on weekdays", "weekly": "Weekly on Mondays"}

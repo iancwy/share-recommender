@@ -38,7 +38,10 @@
    - Email sign-in is on by default. Leave **Confirm email** on; Supabase's built-in email
      sender is rate limited but fine for two people.
    - Under **Authentication > URL Configuration**, set **Site URL** to
-     `http://localhost:8501` so the confirmation link brings you back to the app.
+     `http://localhost:8501` so the confirmation link brings you back to the app. Once the
+     app is deployed ([deploy.md](deploy.md)), change **Site URL** to its address (e.g.
+     `https://ian-shares.streamlit.app`) and add both that and `http://localhost:8501` under
+     **Redirect URLs**, so links work from either.
 
 5. **Create the two accounts.** Run the app (see README), use **Create account** for yourself,
    confirm the email, sign in. Repeat for your wife with her own email.
