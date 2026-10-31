@@ -1,0 +1,260 @@
+"""Drive the Streamlit app headlessly with fake Supabase and market data."""
+
+from pathlib import Path
+from unittest.mock import patch
+
+import pytest
+from streamlit.testing.v1 import AppTest
+
+from share_recommender.core.models import HoldingIn
+from share_recommender.core.preferences import DirectShares, GoalStyle, InvestorPreferences
+from share_recommender.core.universe import Theme
+from tests.fakes import FakeClient, FakeProvider, FakeRepository
+
+APP = str(Path(__file__).parents[1] / "share_recommender" / "ui" / "app.py")
+
+
+def _button(at, label):
+    return next(b for b in at.button if b.label == label)
+
+
+@pytest.fixture
+def repo():
+    return FakeRepository()
+
+
+def _app(repo, signed_in=True):
+    patches = [
+        patch("share_recommender.db.supabase_client.anon_client",
+              return_value=FakeClient(signed_in)),
+        patch("share_recommender.db.repository.PortfolioRepository", return_value=repo),
+        patch("share_recommender.data.get_provider", return_value=FakeProvider()),
+    ]
+    for p in patches:
+        p.start()
+    at = AppTest.from_file(APP, default_timeout=30)
+    return at, patches
+
+
+@pytest.fixture
+def run_app(repo):
+    started = []
+
+    def _run(signed_in=True):
+        at, patches = _app(repo, signed_in)
+        started.extend(patches)
+        return at.run()
+
+    yield _run
+    for p in started:
+        p.stop()
+
+
+def test_login_screen_when_signed_out(run_app):
+    at = run_app(signed_in=False)
+    assert not at.exception
+    assert [b.label for b in at.button] == ["Sign in", "Create account"]
+
+
+def test_add_holding_and_value_it(run_app, repo):
+    at = run_app()
+    assert not at.exception
+    at.sidebar.radio[0].set_value("Holdings").run()
+
+    at.text_input[0].input("vas")
+    at.number_input[0].set_value(10.0)   # units
+    at.number_input[1].set_value(95.5)   # buy price
+    at.number_input[2].set_value(11.0)   # fees
+    _button(at, "Add holding").click().run()
+    assert not at.exception
+
+    (holding,) = repo.holdings.values()
+    assert holding.ticker == "VAS"
+    assert holding.platform == "CMC Markets"
+    assert holding.category_id is not None
+    assert at.metric[0].value == "1,000.00"  # 10 units at fake price 100
+
+    # Values refresh after a change (row selection itself can't be driven by AppTest).
+    repo.update_holding(holding.id, HoldingIn(**holding.model_dump() | {"units": 12}))
+    at.run()
+    assert at.metric[0].value == "1,200.00"
+
+
+def test_validation_errors_shown(run_app, repo):
+    at = run_app()
+    at.sidebar.radio[0].set_value("Holdings").run()
+    at.text_input[0].input("VAS")
+    _button(at, "Add holding").click().run()  # units and price left at 0
+    assert not repo.holdings
+    assert any("greater than 0" in e.value for e in at.error)
+
+
+def test_categories_page_adds_template(run_app, repo):
+    at = run_app()
+    at.sidebar.radio[0].set_value("Categories").run()
+    assert not at.exception
+    kids = next(b for b in at.button if "Kids private school" in b.label)
+    kids.click().run()
+    assert "Kids private school investment fund" in {c.name for c in repo.categories.values()}
+
+
+def test_recommendations_need_the_interview_first(run_app):
+    at = run_app()
+    at.sidebar.radio[0].set_value("Recommendations").run()
+    assert not at.exception
+    _button(at, "Go to Preferences").click().run()
+    assert at.title[0].value == "Preferences"
+
+
+def test_interview_then_recommendation(run_app, repo):
+    at = run_app()
+    at.sidebar.radio[0].set_value("Preferences").run()
+    assert not at.exception
+    at.radio(key="q_direct_shares").set_value(DirectShares.ETF_ONLY)
+    _button(at, "Save my answers").click().run()
+    assert repo.preferences.direct_shares is DirectShares.ETF_ONLY
+
+    (cat,) = repo.categories.values()
+    at.number_input(key=f"q_horizon_years_{cat.id}").set_value(15)
+    _button(at, "Save").click().run()
+    assert repo.category_preferences[cat.id].horizon_years == 15
+
+    at.sidebar.radio[0].set_value("Recommendations").run()
+    assert not at.exception
+    assert at.metric[0].value == "70%"
+    at.number_input(key="rec_amount").set_value(5000.0).run()
+    assert not at.exception
+    assert any("What to buy" in s.value for s in at.subheader)
+
+    with patch("share_recommender.ai.explain.explain", return_value="Plain words.") as fake:
+        _button(at, "Explain it in plain English").click().run()
+    assert fake.called
+    assert any("Plain words." in m.value for m in at.markdown)
+
+
+def test_speculative_goal_from_the_interview(run_app, repo):
+    repo.preferences = InvestorPreferences()
+    (cat,) = repo.categories.values()
+    at = run_app()
+    at.sidebar.radio[0].set_value("Preferences").run()
+    at.radio(key=f"q_style_{cat.id}").set_value(GoalStyle.SPECULATIVE)
+    at.multiselect(key=f"q_themes_{cat.id}").set_value([Theme.AI, Theme.BIOTECH])
+    _button(at, "Save").click().run()
+    saved = repo.category_preferences[cat.id]
+    assert saved.style is GoalStyle.SPECULATIVE and saved.themes == [Theme.AI, Theme.BIOTECH]
+
+    at.sidebar.radio[0].set_value("Recommendations").run()
+    assert not at.exception
+    assert at.metric[0].value == "Speculative"
+
+
+def test_chat_fills_the_questionnaire_for_review(run_app, repo):
+    from share_recommender.ai.interview import Draft, TurnResult
+    from share_recommender.core.preferences import CategoryPreferences, Experience
+
+    (cat,) = repo.categories.values()
+    draft = Draft(InvestorPreferences(experience=Experience.BEGINNER, notes="Saving for a boat."),
+                  {cat.id: CategoryPreferences(horizon_years=12)},
+                  answered={"experience", "notes"}, goal_answered={cat.id: {"horizon_years"}})
+    result = TurnResult("Got it. What markets?", draft, [])
+
+    at = run_app()
+    at.sidebar.radio[0].set_value("Preferences").run()
+    with patch("share_recommender.ai.interview.run_turn", return_value=result) as fake:
+        at.chat_input(key="chat_input").set_value("I'm new and saving for a boat").run()
+    assert not at.exception and fake.called
+    assert any("What markets?" in m.value for m in at.markdown)
+    assert repo.preferences is None  # nothing saved until confirmed
+
+    _button(at, "Save these answers").click().run()
+    assert repo.preferences.experience is Experience.BEGINNER
+    assert repo.preferences.notes == "Saving for a boat."
+    assert repo.category_preferences[cat.id].horizon_years == 12
+
+
+def _with_holdings(repo):
+    from datetime import date
+
+    (cat,) = repo.categories.values()
+    for ticker, units in [("VAS", 10), ("CBA", 5)]:
+        repo.create_holding(HoldingIn(ticker=ticker, exchange="ASX", units=units, buy_price=90,
+                                      buy_date=date(2026, 1, 5), platform="CMC Markets",
+                                      category_id=cat.id))
+    return cat
+
+
+def test_dashboard(run_app, repo):
+    at = run_app()
+    assert not at.exception
+    assert any("No holdings yet" in i.value for i in at.info)
+
+    _with_holdings(repo)
+    at.run()
+    assert not at.exception
+    assert at.title[0].value == "Dashboard"
+    assert at.metric[0].label == "Portfolio value (AUD)"
+    assert at.metric[1].value == "1,350"  # 15 units at 90
+    at.radio(key="dash_by").set_value(at.radio(key="dash_by").options[1]).run()  # platform
+    assert not at.exception
+    at.radio(key="dash_period").set_value("All").run()
+    assert not at.exception
+
+
+def test_health_check_page(run_app, repo):
+    _with_holdings(repo)
+    at = run_app()
+    at.sidebar.radio[0].set_value("Health check").run()
+    assert not at.exception
+    labels = [m.label for m in at.metric]
+    assert labels == ["⛔ Alert", "⚠️ Warning", "ℹ️ Info", "✅ OK"]
+    text = " ".join(m.value for m in at.markdown)
+    assert "in one company (CBA)" in text and "Preferences not answered" in text
+
+
+def test_import_from_pasted_csv(run_app, repo):
+    from tests.test_importer import COMMSEC
+
+    at = run_app()
+    at.sidebar.radio[0].set_value("Import").run()
+    assert not at.exception
+    at.text_area(key="import_text_0").input(COMMSEC).run()
+    assert not at.exception
+    assert any("Found **2 purchase(s)**" in m.value for m in at.markdown)
+    _button(at, "Import 2 holding(s)").click().run()
+    assert not at.exception
+    assert sorted(h.ticker for h in repo.holdings.values()) == ["CBA", "VAS"]
+    assert {h.platform for h in repo.holdings.values()} == {"CommSec"}
+    (cat,) = repo.categories.values()
+    assert {h.category_id for h in repo.holdings.values()} == {cat.id}
+
+    # Importing the same file again finds only duplicates.
+    at.text_area(key="import_text_1").input(COMMSEC).run()
+    assert any("2 are already in your holdings" in m.value for m in at.markdown)
+    assert _button(at, "Import 0 holding(s)").disabled
+
+
+def test_import_snapshot_after_transaction_history(run_app, repo):
+    from datetime import date
+    from decimal import Decimal
+
+    from tests.test_importer import SNAPSHOT
+
+    history_start = date(2024, 5, 1)
+    repo.create_holding(HoldingIn(ticker="VAS", exchange="ASX", units=200, buy_price=95,
+                                  fees=10, buy_date=history_start, platform="CMC Markets"))
+    at = run_app()
+    at.sidebar.radio[0].set_value("Import").run()
+    at.text_area(key="import_text_0").input(SNAPSHOT).run()
+    assert not at.exception
+    # The date defaults to the earliest purchase already imported for CMC Markets.
+    assert at.date_input(key="import_as_at_0").value == history_start
+    assert any("**1** needing a price" in m.value for m in at.markdown)  # WDS
+    _button(at, "Import 3 holding(s)").click().run()  # MSFT, the rest of VAS, DHHF
+    assert not at.exception
+
+    added = sorted((h for h in repo.holdings.values() if h.buy_date == history_start
+                    and h.fees == 0), key=lambda h: h.ticker)
+    assert [(h.ticker, h.units) for h in added] == [("DHHF", 100), ("MSFT", 10), ("VAS", 100)]
+    vas = next(h for h in added if h.ticker == "VAS")
+    assert vas.buy_price == Decimal("79.9")
+    assert next(h for h in added if h.ticker == "MSFT").exchange == "NASDAQ"
