@@ -9,6 +9,10 @@ For one goal category it works out:
    portion if the person wants them;
 3. **gaps**: what the category holds now against that mix;
 4. a **buy plan**: whole units to buy with new money, moving towards the mix without selling.
+   When the goal has a savings account, its cash slice is filled by topping up the account
+   (the one paying the most interest) rather than buying a cash ETF.
+
+Cash in savings accounts counts towards the goal's cash slice throughout.
 
 A **speculative** goal skips step 1: it is all in shares, spread over a few high-growth
 companies and theme ETFs in the themes the person chose.
@@ -24,7 +28,7 @@ from uuid import UUID
 from pydantic import BaseModel
 
 from share_recommender.core.exchanges import EXCHANGES
-from share_recommender.core.models import Category, Holding, RiskLevel
+from share_recommender.core.models import CashAccount, Category, Holding, RiskLevel
 from share_recommender.core.preferences import (
     CategoryPreferences,
     DirectShares,
@@ -73,6 +77,7 @@ MAX_SHARES_PER_SLICE = 5
 MIN_SHARE_WEIGHT = Decimal(2)  # % of the category; smaller positions aren't worth the brokerage
 MIN_TRADE = Decimal(500)       # also the ASX minimum for a first purchase of a stock
 MAX_BROKERAGE_RATIO = Decimal("0.02")
+_SAVINGS = ("", "savings")  # stands in for a savings account top-up in the buy plan
 SPECULATIVE_ETF_FRACTION = Decimal("0.3")  # of a speculative pot, when it also holds shares
 SPECULATIVE_MAX_ETFS = 2                   # 3 when the person wants ETFs only
 SPECULATIVE_MAX_SHARES = 6
@@ -138,12 +143,20 @@ class BuyOrder(BaseModel):
     total_cost: Decimal        # base currency, including brokerage
 
 
+class CashTopUp(BaseModel):
+    institution: str
+    account_name: str | None
+    interest_rate: Decimal  # % a year
+    amount: Decimal         # base currency
+
+
 class BuyPlan(BaseModel):
     amount: Decimal
     base_currency: str
     orders: list[BuyOrder]
     leftover: Decimal
     notes: list[str]
+    cash_topups: list[CashTopUp] = []
 
 
 class Recommendation(BaseModel):
@@ -545,9 +558,12 @@ def by_asset_class(values: dict[tuple[str, str], Decimal]) -> dict[AssetClass, D
 
 
 def analyse_gaps(mix: TargetMix, values: dict[tuple[str, str], Decimal], base: str,
-                 notes: list[str] | None = None) -> Gaps:
-    total = sum(values.values(), Decimal(0))
+                 notes: list[str] | None = None, cash: Decimal = Decimal(0)) -> Gaps:
+    """Current mix against the target. ``cash`` is money in savings accounts, base currency."""
+    total = sum(values.values(), Decimal(0)) + cash
     current = {ac.value: v for ac, v in by_asset_class(values).items()}
+    if cash:
+        current[AssetClass.CASH.value] = current.get(AssetClass.CASH.value, Decimal(0)) + cash
 
     def pct(v: Decimal) -> Decimal:
         return (v / total * 100).quantize(Decimal("0.1")) if total else Decimal(0)
@@ -574,6 +590,8 @@ def analyse_gaps(mix: TargetMix, values: dict[tuple[str, str], Decimal], base: s
     if any((i := lookup(*k)) and i.split for k in values):
         gap_notes.append("Diversified funds are split across asset classes by their "
                          "approximate target allocation.")
+    if cash:
+        gap_notes.append(f"Includes {cash:,.0f} {base} in savings accounts, counted as cash.")
     return Gaps(base_currency=base, total_value=total.quantize(CENT), slices=rows, notes=gap_notes)
 
 
@@ -581,31 +599,43 @@ def analyse_gaps(mix: TargetMix, values: dict[tuple[str, str], Decimal], base: s
 
 def plan_purchase(mix: TargetMix, values: dict[tuple[str, str], Decimal], amount: Decimal,
                   quotes: dict[tuple[str, str], Quote | None], fx: dict[str, Decimal | None],
-                  base: str, brokerage: Decimal = Decimal(0)) -> BuyPlan:
-    """Split new money across the picks to close the biggest gaps first. Never sells."""
+                  base: str, brokerage: Decimal = Decimal(0), cash_value: Decimal = Decimal(0),
+                  cash_accounts: list[CashAccount] = ()) -> BuyPlan:
+    """Split new money across the picks to close the biggest gaps first. Never sells.
+
+    ``cash_value`` is the goal's money in savings accounts. If it has any ``cash_accounts``,
+    the cash slice is topped up in the best-paying one instead of buying a cash ETF.
+    """
     notes: list[str] = []
     if not mix.picks:
         return BuyPlan(amount=amount, base_currency=base, orders=[], leftover=amount,
                        notes=["Nothing to buy until this goal has suggested investments."])
+    best = max(cash_accounts, key=lambda a: a.interest_rate) if cash_accounts else None
     picks = []
     for p in mix.picks:
+        if best and p.asset_class is AssetClass.CASH:
+            continue  # the savings account fills the cash slice
         q, rate_ok = quotes.get((p.ticker, p.exchange)), to_base(Decimal(1), p.currency, base, fx)
         if q is None or rate_ok is None:
             notes.append(f"{p.ticker} is skipped: no current price or exchange rate.")
         else:
             picks.append(p)
 
-    total_after = sum(values.values(), Decimal(0)) + amount
+    total_after = sum(values.values(), Decimal(0)) + cash_value + amount
     slice_current = by_asset_class(values)
+    slice_current[AssetClass.CASH] = slice_current.get(AssetClass.CASH, Decimal(0)) + cash_value
 
     # How far each pick is below its share of the slice's target, after the new money.
     want: dict[tuple[str, str], Decimal] = {}
     for sl in mix.slices:
+        slice_short = max(Decimal(0), total_after * sl.weight / 100
+                          - slice_current.get(sl.asset_class, Decimal(0)))
+        if best and sl.asset_class is AssetClass.CASH:
+            want[_SAVINGS] = slice_short
+            continue
         in_slice = [p for p in picks if p.asset_class is sl.asset_class]
         if not in_slice:
             continue
-        slice_short = max(Decimal(0), total_after * sl.weight / 100
-                          - slice_current.get(sl.asset_class, Decimal(0)))
         pick_short = {(p.ticker, p.exchange): max(Decimal(0), total_after * p.weight / 100
                                                   - values.get((p.ticker, p.exchange), Decimal(0)))
                       for p in in_slice}
@@ -616,11 +646,12 @@ def plan_purchase(mix: TargetMix, values: dict[tuple[str, str], Decimal], amount
     total_want = sum(want.values(), Decimal(0))
     alloc = {k: amount * v / total_want for k, v in want.items() if v > 0} if total_want else {}
 
-    # Drop trades too small to be worth it and share their money among the rest.
+    # Drop trades too small to be worth it and share their money among the rest. A savings
+    # top-up has no brokerage, so it's never dropped.
     min_trade = max(MIN_TRADE, brokerage / MAX_BROKERAGE_RATIO)
     dropped = []
-    while alloc:
-        smallest = min(alloc, key=alloc.get)
+    while [k for k in alloc if k != _SAVINGS]:
+        smallest = min((k for k in alloc if k != _SAVINGS), key=alloc.get)
         if alloc[smallest] >= min_trade:
             break
         freed = alloc.pop(smallest)
@@ -636,6 +667,7 @@ def plan_purchase(mix: TargetMix, values: dict[tuple[str, str], Decimal], amount
         notes.append(f"The amount is too small to buy anything worthwhile (minimum trade "
                      f"{min_trade:,.0f} {base}).")
 
+    savings = alloc.pop(_SAVINGS, Decimal(0))
     by_key = {(p.ticker, p.exchange): p for p in picks}
     orders: dict[tuple[str, str], BuyOrder] = {}
     for key, budget in alloc.items():
@@ -649,7 +681,7 @@ def plan_purchase(mix: TargetMix, values: dict[tuple[str, str], Decimal], amount
                          f"{unit_cost:,.0f} {base}, more than its share of this amount.")
 
     # Spend what's left on whole units, most underweight first.
-    leftover = amount - sum((o.total_cost for o in orders.values()), Decimal(0))
+    leftover = amount - savings - sum((o.total_cost for o in orders.values()), Decimal(0))
     changed = True
     while changed:
         changed = False
@@ -662,13 +694,24 @@ def plan_purchase(mix: TargetMix, values: dict[tuple[str, str], Decimal], amount
                 leftover -= unit_cost
                 changed = True
                 break
-    leftover = amount - sum((o.total_cost for o in orders.values()), Decimal(0))
+    leftover = amount - savings - sum((o.total_cost for o in orders.values()), Decimal(0))
+
+    topups = []
+    if best:
+        # Cash takes any amount, so whole dollars left over go to the savings account too.
+        savings = (savings + leftover).to_integral_value(ROUND_FLOOR)
+        leftover = amount - savings - sum((o.total_cost for o in orders.values()), Decimal(0))
+        if savings > 0:
+            topups.append(CashTopUp(institution=best.institution, account_name=best.account_name,
+                                    interest_rate=best.interest_rate, amount=savings))
+            notes.append(f"The cash part goes into {best.label} ({best.interest_rate:g}% a "
+                         "year) rather than a cash ETF.")
 
     if any(p.currency != base for p in picks if (p.ticker, p.exchange) in orders):
         notes.append("Costs for overseas shares use today's exchange rate; your broker's rate "
                      "and any currency fee will differ a little.")
     return BuyPlan(amount=amount, base_currency=base, orders=list(orders.values()),
-                   leftover=leftover.quantize(CENT), notes=notes)
+                   leftover=leftover.quantize(CENT), notes=notes, cash_topups=topups)
 
 
 def _order(p: Pick, price: Decimal, units: int, unit_cost: Decimal, brokerage: Decimal

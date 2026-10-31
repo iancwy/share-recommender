@@ -2,6 +2,9 @@
 
 All amounts are in the person's base currency. Exchange rates are given as units of the
 other currency per 1 unit of base (AUD->USD 0.65), the same convention as everywhere else.
+
+Cash in savings accounts is passed alongside holdings as ``CashValue``s. It is valued at its
+balance, always counts as cash, and grows at the account's own interest rate in projections.
 """
 
 from bisect import bisect_right
@@ -11,11 +14,12 @@ from decimal import Decimal
 from enum import StrEnum
 from uuid import UUID
 
-from share_recommender.core.models import Category, Holding
+from share_recommender.core.models import CashAccount, Category, Holding
 from share_recommender.core.portfolio import UNCATEGORISED
 from share_recommender.core.universe import (
     ASSET_CLASS_LABELS,
     GROWTH_CLASSES,
+    AssetClass,
     Kind,
     classify,
     lookup,
@@ -34,8 +38,8 @@ ASSUMED_RETURN = {"growth": Decimal("0.07"), "cash": Decimal("0.035")}
 @dataclass(frozen=True)
 class ValuePoint:
     day: date
-    value: Decimal     # what the holdings bought by this day were worth
-    invested: Decimal  # what was paid for them, including fees
+    value: Decimal     # what the holdings bought by this day were worth, plus cash
+    invested: Decimal  # what was paid for them, including fees, plus cash
 
 
 class _Series:
@@ -64,12 +68,14 @@ def sample_days(start: date, end: date) -> list[date]:
 
 
 def value_series(holdings: list[Holding], prices: dict[tuple[str, str], list[PriceBar]],
-                 fx: dict[str, list[PriceBar]], base: str, start: date, end: date
-                 ) -> list[ValuePoint]:
+                 fx: dict[str, list[PriceBar]], base: str, start: date, end: date,
+                 cash: list[CashAccount] = ()) -> list[ValuePoint]:
     """Daily (or weekly) portfolio value and money invested.
 
     Before a holding's first known price it counts at its buy price. Money invested is
-    converted at the exchange rate on the buy date; value at the rate on each day.
+    converted at the exchange rate on the buy date; value at the rate on each day. Cash
+    accounts have no balance history, so each adds its current balance as a flat line from
+    the date it was last checked.
     """
     price_series = {k: _Series(v) for k, v in prices.items()}
     fx_series = {c: _Series(v) for c, v in fx.items()}
@@ -93,6 +99,11 @@ def value_series(holdings: list[Holding], prices: dict[tuple[str, str], list[Pri
             price = (s.at(day) if s else None) or h.buy_price
             value += h.units * price / r_now
             invested += h.cost_base / r_bought
+        for a in cash:
+            r_now, r_then = rate(a.currency, day), rate(a.currency, a.as_of)
+            if a.as_of <= day and r_now and r_then:
+                value += a.balance / r_now
+                invested += a.balance / r_then
         points.append(ValuePoint(day, value.quantize(CENT), invested.quantize(CENT)))
     return points
 
@@ -105,6 +116,28 @@ class HoldingValue:
     value: Decimal        # base currency; at cost if there's no price
     cost: Decimal         # base currency, at today's rate
     priced: bool
+
+
+@dataclass(frozen=True)
+class CashValue:
+    account: CashAccount
+    value: Decimal  # base currency
+
+    @property
+    def rate(self) -> Decimal:
+        """Yearly interest as a fraction (5.25% -> 0.0525)."""
+        return self.account.interest_rate / 100
+
+
+def cash_values(accounts: list[CashAccount], fx: dict[str, Decimal | None], base: str
+                ) -> list[CashValue]:
+    """Cash accounts valued in base currency. Accounts with no exchange rate are left out."""
+    out = []
+    for a in accounts:
+        rate = Decimal(1) if a.currency == base else fx.get(a.currency)
+        if rate:
+            out.append(CashValue(a, (a.balance / rate).quantize(CENT)))
+    return out
 
 
 def current_values(holdings: list[Holding], quotes: dict[tuple[str, str], Quote | None],
@@ -141,10 +174,11 @@ class Slice:
 
 
 def breakdown(values: list[HoldingValue], categories: list[Category], by: Dimension,
-              top: int = 10) -> list[Slice]:
-    """Value per goal, platform, asset class, currency or holding, largest first.
+              top: int = 10, cash: list[CashValue] = ()) -> list[Slice]:
+    """Value per goal, platform, type, asset class, currency or holding, largest first.
 
     Holdings beyond the top ``top`` are folded into "Other" so the chart stays readable.
+    Cash accounts count under their goal, their bank (as the platform) and as cash.
     """
     names: dict[UUID, str] = {c.id: c.name for c in categories}
 
@@ -172,6 +206,14 @@ def breakdown(values: list[HoldingValue], categories: list[Category], by: Dimens
                 totals[name] = totals.get(name, Decimal(0)) + v.value * frac
         else:
             totals[label(v)] = totals.get(label(v), Decimal(0)) + v.value
+    for c in cash:
+        a = c.account
+        name = {Dimension.GOAL: names.get(a.category_id, UNCATEGORISED) if a.category_id
+                else UNCATEGORISED,
+                Dimension.PLATFORM: a.institution, Dimension.TYPE: "Cash",
+                Dimension.ASSET_CLASS: ASSET_CLASS_LABELS[AssetClass.CASH],
+                Dimension.CURRENCY: a.currency, Dimension.HOLDING: a.label}[by]
+        totals[name] = totals.get(name, Decimal(0)) + c.value
     total = sum(totals.values(), Decimal(0))
     ordered = sorted(totals.items(), key=lambda kv: kv[1], reverse=True)
     if len(ordered) > top:
@@ -189,7 +231,7 @@ class GoalProgress:
     value: Decimal
     target: Decimal | None
     years_left: Decimal | None
-    assumed_return: Decimal         # yearly, from the goal's current mix of shares
+    assumed_return: Decimal         # yearly, blended from the goal's shares and cash
     projected: Decimal | None       # value at the target date with no more money added
     monthly_needed: Decimal | None  # extra per month to reach the target, at that return
 
@@ -204,28 +246,47 @@ class GoalProgress:
         return self.projected >= self.target
 
 
-def assumed_return(values: list[HoldingValue]) -> Decimal:
-    """Blend of the shares and cash assumptions, by the share held in shares."""
+def _holdings_return(values: list[HoldingValue]) -> Decimal:
+    """Blend of the shares and cash-fund assumptions, by the share held in shares."""
     total = sum((v.value for v in values), Decimal(0))
     if not total:
         return ASSUMED_RETURN["growth"]
     growth = sum((v.value * frac for v in values
                   for ac, frac in classify(v.holding.ticker, v.holding.exchange).items()
                   if ac in GROWTH_CLASSES), Decimal(0)) / total
-    return (growth * ASSUMED_RETURN["growth"]
-            + (1 - growth) * ASSUMED_RETURN["cash"]).quantize(Decimal("0.0001"))
+    return growth * ASSUMED_RETURN["growth"] + (1 - growth) * ASSUMED_RETURN["cash"]
 
 
-def goal_progress(category: Category, values: list[HoldingValue], today: date) -> GoalProgress:
-    value = sum((v.value for v in values), Decimal(0))
-    rate = assumed_return(values)
+def assumed_return(values: list[HoldingValue], cash: list[CashValue] = ()) -> Decimal:
+    """Yearly return for a goal: holdings at the assumptions, cash at each account's rate."""
+    held = sum((v.value for v in values), Decimal(0))
+    total = held + sum((c.value for c in cash), Decimal(0))
+    if not total:
+        return ASSUMED_RETURN["growth"]
+    blended = (held * _holdings_return(values) + sum((c.value * c.rate for c in cash),
+                                                      Decimal(0))) / total
+    return blended.quantize(Decimal("0.0001"))
+
+
+def _grow(amount: Decimal, yearly: Decimal, months: int) -> Decimal:
+    return amount * (1 + yearly) ** (Decimal(months) / 12)
+
+
+def goal_progress(category: Category, values: list[HoldingValue], today: date,
+                  cash: list[CashValue] = ()) -> GoalProgress:
+    value = sum((v.value for v in values), Decimal(0)) + sum((c.value for c in cash), Decimal(0))
+    rate = assumed_return(values, cash)
     target = category.target_amount
     if not category.target_date:
         return GoalProgress(category, value, target, None, rate, None, None)
     years = max(Decimal(0), Decimal((category.target_date - today).days) / Decimal("365.25"))
     months = int(years * 12)
     monthly = (1 + rate) ** (Decimal(1) / 12) - 1
-    projected = (value * (1 + monthly) ** months).quantize(CENT)
+    # Holdings grow at the assumptions, each cash account at its own rate.
+    projected = (_grow(sum((v.value for v in values), Decimal(0)), _holdings_return(values),
+                       months)
+                 + sum((_grow(c.value, c.rate, months) for c in cash), Decimal(0))
+                 ).quantize(CENT)
     needed = None
     if target is not None:
         shortfall = target - projected

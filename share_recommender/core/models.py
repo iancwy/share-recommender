@@ -113,6 +113,63 @@ class Holding(HoldingIn):
         return v
 
 
+class CashAccountIn(BaseModel):
+    """Cash in a savings account, entered by hand and updated now and then."""
+
+    institution: str = Field(min_length=1, max_length=50, description="Bank or platform")
+    account_name: str | None = Field(default=None, max_length=100)
+    balance: Decimal = Field(ge=0)
+    interest_rate: Decimal = Field(default=Decimal("0"), ge=0, le=100,
+                                   description="% a year, e.g. 5.25")
+    currency: str = Field(default="AUD", pattern=r"^[A-Z]{3}$")
+    as_of: date = Field(default_factory=date.today, description="When the balance was checked")
+    category_id: UUID | None = None
+    notes: str | None = None
+
+    @field_validator("institution")
+    @classmethod
+    def _strip_institution(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            raise ValueError("Bank or platform cannot be blank")
+        return v
+
+    @field_validator("account_name", "notes")
+    @classmethod
+    def _blank_is_none(cls, v: str | None) -> str | None:
+        return v.strip() or None if v is not None else None
+
+    @field_validator("currency", mode="before")
+    @classmethod
+    def _upper_currency(cls, v: str) -> str:
+        return v.strip().upper() if isinstance(v, str) else v
+
+    @field_validator("as_of")
+    @classmethod
+    def _not_in_future(cls, v: date) -> date:
+        if v > date.today():
+            raise ValueError("Balance date cannot be in the future")
+        return v
+
+    @property
+    def label(self) -> str:
+        return f"{self.institution} {self.account_name}" if self.account_name else self.institution
+
+
+class CashAccount(CashAccountIn):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    user_id: UUID
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+    @field_validator("as_of")
+    @classmethod
+    def _not_in_future(cls, v: date) -> date:
+        return v
+
+
 FALLBACK_PLATFORM = "CMC Markets"
 
 

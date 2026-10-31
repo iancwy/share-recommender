@@ -8,6 +8,8 @@ from typing import Any
 from uuid import UUID
 
 from share_recommender.core.models import (
+    CashAccount,
+    CashAccountIn,
     Category,
     CategoryIn,
     Holding,
@@ -19,7 +21,7 @@ from share_recommender.core.preferences import CategoryPreferences, InvestorPref
 from supabase import Client
 
 
-def _payload(model: CategoryIn | HoldingIn) -> dict[str, Any]:
+def _payload(model: CategoryIn | HoldingIn | CashAccountIn) -> dict[str, Any]:
     return model.model_dump(mode="json")
 
 
@@ -47,10 +49,17 @@ class PortfolioRepository:
         return Profile.model_validate(rows[0])
 
     def rename_platform(self, old: str, new: str | None) -> int:
-        """Move every holding on platform ``old`` to ``new``. Returns how many moved."""
+        """Move every holding and cash account on platform ``old`` to ``new``.
+
+        Cash accounts need a name, so they keep ``old`` if ``new`` is blank.
+        Returns how many moved.
+        """
         new = (new or "").strip() or None
         rows = (self._db.table("holdings").update({"platform": new}).eq("platform", old)
                 .execute().data)
+        if new:
+            rows += (self._db.table("cash_accounts").update({"institution": new})
+                     .eq("institution", old).execute().data)
         return len(rows)
 
     # Interview answers ---------------------------------------------------
@@ -152,3 +161,31 @@ class PortfolioRepository:
 
     def delete_holding(self, holding_id: UUID) -> None:
         self._db.table("holdings").delete().eq("id", str(holding_id)).execute()
+
+    # Cash accounts -------------------------------------------------------
+
+    def list_cash_accounts(self, category_id: UUID | None = None) -> list[CashAccount]:
+        query = self._db.table("cash_accounts").select("*")
+        if category_id is not None:
+            query = query.eq("category_id", str(category_id))
+        rows = query.order("institution").execute().data
+        return [CashAccount.model_validate(r) for r in rows]
+
+    def create_cash_account(self, account: CashAccountIn) -> CashAccount:
+        rows = self._db.table("cash_accounts").insert(_payload(account)).execute().data
+        return CashAccount.model_validate(rows[0])
+
+    def update_cash_account(self, account_id: UUID, account: CashAccountIn) -> CashAccount:
+        rows = (
+            self._db.table("cash_accounts")
+            .update(_payload(account))
+            .eq("id", str(account_id))
+            .execute()
+            .data
+        )
+        if not rows:
+            raise LookupError(f"Cash account {account_id} not found")
+        return CashAccount.model_validate(rows[0])
+
+    def delete_cash_account(self, account_id: UUID) -> None:
+        self._db.table("cash_accounts").delete().eq("id", str(account_id)).execute()

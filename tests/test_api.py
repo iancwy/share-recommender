@@ -108,3 +108,17 @@ def test_update_me_with_default_platform(client):
                                 "default_platform": " Stake "})
     assert r.status_code == 200 and r.json()["default_platform"] == "Stake"
     assert client.put("/me", json={"base_currency": "aud"}).status_code == 422
+
+
+def test_cash_accounts(client):
+    body = {"institution": "ING", "account_name": "Savings Maximiser", "balance": "5000",
+            "interest_rate": "5.5"}
+    created = client.post("/cash-accounts", json=body)
+    assert created.status_code == 201
+    account_id = created.json()["id"]
+    updated = client.put(f"/cash-accounts/{account_id}", json=body | {"balance": "6000"})
+    assert updated.json()["balance"] == "6000"
+    assert len(client.get("/cash-accounts").json()) == 1
+    assert client.post("/cash-accounts", json=body | {"balance": "-1"}).status_code == 422
+    assert client.delete(f"/cash-accounts/{account_id}").status_code == 204
+    assert client.get("/cash-accounts").json() == []

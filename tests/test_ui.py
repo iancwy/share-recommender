@@ -6,7 +6,7 @@ from unittest.mock import patch
 import pytest
 from streamlit.testing.v1 import AppTest
 
-from share_recommender.core.models import HoldingIn
+from share_recommender.core.models import CashAccountIn, HoldingIn
 from share_recommender.core.preferences import DirectShares, GoalStyle, InvestorPreferences
 from share_recommender.core.universe import Theme
 from tests.fakes import FakeClient, FakeProvider, FakeRepository
@@ -199,7 +199,7 @@ def _with_holdings(repo):
 def test_dashboard(run_app, repo):
     at = run_app()
     assert not at.exception
-    assert any("No holdings yet" in i.value for i in at.info)
+    assert any("Nothing here yet" in i.value for i in at.info)
 
     _with_holdings(repo)
     at.run()
@@ -335,3 +335,56 @@ def test_default_platform_on_profile_page(run_app, repo):
     assert not at.exception
     assert repo.profile.default_platform == "CommSec"
     assert repo.profile.platform_for_new == "CommSec"
+
+
+def test_cash_page_add_edit_delete(run_app, repo):
+    (cat,) = repo.categories.values()
+    at = run_app()
+    at.sidebar.radio[0].set_value("Cash").run()
+    assert not at.exception
+    assert any("No cash accounts yet" in i.value for i in at.info)
+
+    _type_option(at.selectbox(key="add_cash_institution"), "ING")
+    at.text_input(key="add_cash_name").input("Savings Maximiser")
+    at.number_input(key="add_cash_balance").set_value(5000.0)
+    at.number_input(key="add_cash_rate").set_value(5.5)
+    _button(at, "Add cash account").click().run()
+    assert not at.exception
+    (account,) = repo.cash.values()
+    assert (account.institution, account.balance, float(account.interest_rate),
+            account.category_id, account.currency) == ("ING", 5000, 5.5, cat.id, "AUD")
+
+    at = run_app()
+    at.sidebar.radio[0].set_value("Cash").run()
+    assert at.metric[0].value == "5,000.00"
+    at.selectbox(key="edit_cash").set_value(account).run()
+    at.number_input(key=f"edit_cash_{account.id}_balance").set_value(6500.0)
+    _button(at, "Save changes").click().run()
+    assert not at.exception
+    assert repo.cash[account.id].balance == 6500
+
+    at = run_app()
+    at.sidebar.radio[0].set_value("Cash").run()
+    at.selectbox(key="edit_cash").set_value(repo.cash[account.id]).run()
+    at.checkbox(key=f"confirm_cash_{account.id}").check().run()
+    _button(at, "Delete cash account").click().run()
+    assert not repo.cash
+
+    # Deleting a goal keeps its cash accounts, uncategorised.
+    kept = repo.create_cash_account(CashAccountIn(institution="Ubank", balance=1,
+                                                  category_id=cat.id))
+    repo.delete_category(cat.id)
+    assert repo.cash[kept.id].category_id is None
+
+
+def test_dashboard_counts_cash(run_app, repo):
+    from datetime import date
+
+    (cat,) = repo.categories.values()
+    repo.create_holding(HoldingIn(ticker="VAS", exchange="ASX", units=100, buy_price=100,
+                                  buy_date=date(2026, 1, 5), category_id=cat.id))
+    repo.create_cash_account(CashAccountIn(institution="ING", balance=5000, interest_rate=5,
+                                           category_id=cat.id))
+    at = run_app()
+    assert not at.exception
+    assert at.metric[0].value == "15,000"  # 100 units at the fake price of 100, plus cash

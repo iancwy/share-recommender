@@ -32,6 +32,8 @@ from share_recommender.core.importer import (
 )
 from share_recommender.core.models import (
     FALLBACK_PLATFORM,
+    CashAccount,
+    CashAccountIn,
     Category,
     CategoryIn,
     Holding,
@@ -53,6 +55,7 @@ from share_recommender.portfolio_service import (
     health_report,
     portfolio_history,
     total,
+    valued_cash,
     valued_holdings,
 )
 from share_recommender.recommendations import build_recommendation
@@ -300,6 +303,113 @@ def _holdings_page(repo: PortfolioRepository) -> None:
                 moved = repo.rename_platform(old, new_name)
                 st.toast(f"Moved {moved} holding(s) to {new_name.strip()}")
                 st.rerun()
+
+
+# Cash -------------------------------------------------------------------------
+
+def _cash_form(key: str, categories: list[Category], institutions: list[str], base: str,
+               existing: CashAccount | None = None) -> CashAccountIn | None:
+    cat_ids = [c.id for c in categories] + [None]
+    cat_names = {c.id: c.name for c in categories} | {None: UNCATEGORISED}
+    currency = existing.currency if existing else base
+    with st.form(key, clear_on_submit=existing is None):
+        c1, c2 = st.columns(2)
+        institution = c1.selectbox(
+            "Bank or platform", institutions, key=f"{key}_institution", accept_new_options=True,
+            index=institutions.index(existing.institution)
+            if existing and existing.institution in institutions else None,
+            placeholder="Choose or type, e.g. ING", help="Type a new name to add it.")
+        account_name = c2.text_input("Account name (optional)", key=f"{key}_name",
+                                     value=(existing.account_name or "") if existing else "",
+                                     placeholder="e.g. Savings Maximiser")
+        c3, c4 = st.columns(2)
+        balance = c3.number_input(f"Balance ({currency})", min_value=0.0, step=100.0,
+                                  format="%.2f", key=f"{key}_balance",
+                                  value=float(existing.balance) if existing else 0.0)
+        rate = c4.number_input("Interest rate (% a year)", min_value=0.0, max_value=100.0,
+                               step=0.05, format="%.2f", key=f"{key}_rate",
+                               value=float(existing.interest_rate) if existing else 0.0,
+                               help="Used to project the goal. Update it when the rate changes.")
+        c5, c6 = st.columns(2)
+        category_id = c5.selectbox("Goal", cat_ids, format_func=lambda cid: cat_names[cid],
+                                   index=cat_ids.index(existing.category_id) if existing else 0,
+                                   key=f"{key}_goal")
+        as_of = c6.date_input("Balance as at", value=existing.as_of if existing else date.today(),
+                              max_value=date.today(), format="DD/MM/YYYY", key=f"{key}_as_of")
+        notes = st.text_input("Notes", value=(existing.notes or "") if existing else "",
+                              key=f"{key}_notes")
+        submitted = st.form_submit_button("Save changes" if existing else "Add cash account",
+                                          type="primary")
+    if not submitted:
+        return None
+    try:
+        return CashAccountIn(institution=institution or "", account_name=account_name,
+                             balance=Decimal(str(balance)), interest_rate=Decimal(str(rate)),
+                             currency=currency, as_of=as_of, category_id=category_id,
+                             notes=notes)
+    except ValidationError as exc:
+        _show_errors(exc)
+        return None
+
+
+def _cash_page(repo: PortfolioRepository) -> None:
+    st.caption("Cash in high-interest savings accounts. It counts in your totals, fills each "
+               "goal's cash slice, and grows at its own interest rate in projections. Update "
+               "balances now and then: the app doesn't connect to your bank.")
+    categories = repo.list_categories()
+    accounts = repo.list_cash_accounts()
+    profile = repo.get_profile()
+    base = profile.base_currency if profile else "AUD"
+    institutions = sorted({a.institution for a in accounts}
+                          | {h.platform for h in repo.list_holdings() if h.platform})
+
+    st.subheader("Add a cash account")
+    new = _cash_form("add_cash", categories, institutions, base)
+    if new:
+        repo.create_cash_account(new)
+        st.toast(f"Added {new.label}")
+        st.rerun()
+
+    st.divider()
+    if not accounts:
+        st.info("No cash accounts yet. Add one above.")
+        return
+    st.subheader(f"Your cash ({len(accounts)})")
+    names = {c.id: c.name for c in categories}
+    by_ccy: dict[str, Decimal] = {}
+    for a in accounts:
+        by_ccy[a.currency] = by_ccy.get(a.currency, Decimal(0)) + a.balance
+    for col, (ccy, amount) in zip(st.columns(len(by_ccy)), by_ccy.items(), strict=True):
+        col.metric(f"Total cash ({ccy})", f"{amount:,.2f}")
+    st.dataframe(pd.DataFrame([
+        {"Bank or platform": a.institution, "Account": a.account_name or "",
+         "Goal": names.get(a.category_id, UNCATEGORISED) if a.category_id else UNCATEGORISED,
+         "Balance": float(a.balance), "Ccy": a.currency, "Rate (% a year)": float(a.interest_rate),
+         "As at": a.as_of, "Notes": a.notes or ""}
+        for a in accounts
+    ]), hide_index=True, column_config={
+        "Balance": st.column_config.NumberColumn(format="%.2f"),
+        "Rate (% a year)": st.column_config.NumberColumn(format="%.2f"),
+        "As at": st.column_config.DateColumn(format="DD/MM/YYYY")})
+
+    st.subheader("Edit or delete a cash account")
+    selected = st.selectbox("Cash account", accounts, index=None, key="edit_cash",
+                            placeholder="Choose an account",
+                            format_func=lambda a: f"{a.label} · {a.balance:,.2f} {a.currency}")
+    if selected is None:
+        return
+    updated = _cash_form(f"edit_cash_{selected.id}", categories, institutions, base,
+                         existing=selected)
+    if updated:
+        repo.update_cash_account(selected.id, updated)
+        st.toast(f"Updated {updated.label}")
+        st.rerun()
+    confirm = st.checkbox("Yes, I want to delete this cash account",
+                          key=f"confirm_cash_{selected.id}")
+    if st.button("Delete cash account", disabled=not confirm, key=f"delete_cash_{selected.id}"):
+        repo.delete_cash_account(selected.id)
+        st.toast(f"Deleted {selected.label}")
+        st.rerun()
 
 
 # Categories -------------------------------------------------------------------
@@ -628,7 +738,8 @@ def _recommendations_page(repo: PortfolioRepository) -> None:
                                [h for h in all_holdings if h.category_id == cat.id], base,
                                _quotes, _fx_rates, _fundamentals,
                                amount=Decimal(str(amount)) if amount else None,
-                               all_holdings=all_holdings)
+                               all_holdings=all_holdings,
+                               cash_accounts=repo.list_cash_accounts(cat.id))
     mix, gaps = rec.mix, rec.gaps
     st.caption(DISCLAIMER)
 
@@ -694,6 +805,10 @@ def _recommendations_page(repo: PortfolioRepository) -> None:
                 format="%.2f")})
             st.caption(f"Left over: {plan.leftover:,.2f} {base}. Prices are the latest "
                        "available and will move before you trade.")
+        for t in plan.cash_topups:
+            account = f"{t.institution} {t.account_name}" if t.account_name else t.institution
+            st.markdown(f"**Add {t.amount:,.0f} {base} to {account}** "
+                        f"({t.interest_rate:g}% a year)")
         for note in plan.notes:
             st.caption(note)
 
@@ -796,16 +911,18 @@ def _history(symbols: tuple[tuple[str, str], ...], currencies: tuple[str, ...], 
 
 def _dashboard_page(repo: PortfolioRepository) -> None:
     holdings = repo.list_holdings()
-    if not holdings:
-        st.info("No holdings yet. Add them on the Holdings page, or import a broker export on "
-                "the Import page.")
+    accounts = repo.list_cash_accounts()
+    if not holdings and not accounts:
+        st.info("Nothing here yet. Add holdings on the Holdings page, cash on the Cash page, or "
+                "import a broker export on the Import page.")
         return
     categories = repo.list_categories()
     profile = repo.get_profile()
     base = profile.base_currency if profile else "AUD"
     values = valued_holdings(holdings, base, _quotes, _fx_rates)
-    value, cost = total(values)
-    gain = value - cost
+    cash = valued_cash(accounts, base, _fx_rates)
+    value, cost = total(values, cash)
+    gain = value - cost  # cash counts in both, so it doesn't change the gain
 
     m1, m2, m3, m4 = st.columns(4)
     m1.metric(f"Portfolio value ({base})", f"{value:,.0f}")
@@ -820,10 +937,10 @@ def _dashboard_page(repo: PortfolioRepository) -> None:
     period = st.radio("Period", list(PERIODS), index=2, horizontal=True, key="dash_period",
                       label_visibility="collapsed")
     today = date.today()
-    first_buy = min(h.buy_date for h in holdings)
+    first_buy = min([h.buy_date for h in holdings] + [a.as_of for a in accounts])
     days = PERIODS[period]
     start = max(first_buy, today - timedelta(days=days)) if days else first_buy
-    points = portfolio_history(holdings, base, start, today, _history)
+    points = portfolio_history(holdings, base, start, today, _history, cash=accounts)
     if len(points) > 1:
         st.altair_chart(_value_chart(points, base), use_container_width=True)
         with st.expander("Show as a table"):
@@ -831,14 +948,16 @@ def _dashboard_page(repo: PortfolioRepository) -> None:
                                         f"Money invested ({base})": float(p.invested)}
                                        for p in points]), hide_index=True)
         st.caption("Money invested is what you paid, including fees, at the exchange rate on "
-                   "the day. Value uses each day's closing price.")
+                   "the day. Value uses each day's closing price."
+                   + (" Cash accounts have no balance history, so each shows as a flat line "
+                      "from the date its balance was last updated." if accounts else ""))
     else:
         st.caption("Not enough history yet to draw a chart.")
 
     st.subheader("Where your money is")
     by = st.radio("Break down by", list(Dimension), horizontal=True, key="dash_by",
                   format_func=lambda d: d.value)
-    slices = breakdown(values, categories, by)
+    slices = breakdown(values, categories, by, cash=cash)
     st.altair_chart(_bar_chart(slices, base), use_container_width=True)
     with st.expander("Show as a table"):
         st.dataframe(pd.DataFrame([{by.value: s.label, f"Value ({base})": float(s.value),
@@ -848,7 +967,8 @@ def _dashboard_page(repo: PortfolioRepository) -> None:
     st.subheader("Progress towards your goals")
     for cat in categories:
         in_goal = [v for v in values if v.holding.category_id == cat.id]
-        p = goal_progress(cat, in_goal, today)
+        p = goal_progress(cat, in_goal, today,
+                          [c for c in cash if c.account.category_id == cat.id])
         with st.container(border=True):
             st.markdown(f"**{cat.name}**")
             if p.target:
@@ -867,24 +987,26 @@ def _dashboard_page(repo: PortfolioRepository) -> None:
                            f"{cat.target_date:%b %Y} at an assumed {p.assumed_return * 100:g}% "
                            f"a year. Adding about {p.monthly_needed:,.0f} {base} a month would "
                            "close the gap.")
-    st.caption("Projections assume steady returns of 7% a year for shares and 3.5% for cash, "
-               "before fees and tax. Real returns vary a lot from year to year; "
-               "this is an illustration, not a forecast.")
+    st.caption("Projections assume steady returns of 7% a year for shares and 3.5% for cash "
+               "funds, with savings accounts at their own interest rate, before fees and tax. "
+               "Real returns vary a lot from year to year; this is an illustration, not a "
+               "forecast.")
 
 
 # Health check -----------------------------------------------------------------
 
 def _health_page(repo: PortfolioRepository) -> None:
     holdings = repo.list_holdings()
-    if not holdings:
-        st.info("No holdings yet, so there's nothing to check.")
+    accounts = repo.list_cash_accounts()
+    if not holdings and not accounts:
+        st.info("No holdings or cash yet, so there's nothing to check.")
         return
     categories = repo.list_categories()
     profile = repo.get_profile()
     base = profile.base_currency if profile else "AUD"
     goal_prefs = {c.id: repo.get_category_preferences(c.id) for c in categories}
     report = health_report(categories, holdings, repo.get_preferences(), goal_prefs, base,
-                           _quotes, _fx_rates, _fundamentals)
+                           _quotes, _fx_rates, _fundamentals, cash_accounts=accounts)
 
     st.caption("Checks each goal against its target mix and deadline, and the whole portfolio "
                "for concentration, fees and missing data. Fixes are always about where new "
@@ -1168,6 +1290,7 @@ def main() -> None:
 PAGES = {
     "Dashboard": _dashboard_page,
     "Holdings": _holdings_page,
+    "Cash": _cash_page,
     "Import": _import_page,
     "Categories": _categories_page,
     "Preferences": _preferences_page,

@@ -8,7 +8,8 @@ from collections.abc import Callable
 from datetime import date
 from decimal import Decimal
 
-from share_recommender.core.models import Category, Holding
+from share_recommender.core.models import CashAccount, Category, Holding
+from share_recommender.core.performance import cash_values
 from share_recommender.core.preferences import (
     CategoryPreferences,
     IncomeGrowth,
@@ -50,9 +51,11 @@ def build_recommendation(
     amount: Decimal | None = None,
     today: date | None = None,
     all_holdings: list[Holding] | None = None,
+    cash_accounts: list[CashAccount] = (),
 ) -> Recommendation:
-    """Recommendation for one category. ``holdings`` should be that category's holdings;
-    ``all_holdings`` (every category) lets a speculative goal be checked against the total."""
+    """Recommendation for one category. ``holdings`` and ``cash_accounts`` should be that
+    category's; ``all_holdings`` (every category) lets a speculative goal be checked against
+    the total."""
     today = today or date.today()
     held = {(h.ticker, h.exchange) for h in holdings}
     all_holdings = all_holdings or []
@@ -71,11 +74,14 @@ def build_recommendation(
                            | {(p.ticker, p.exchange) for p in mix.picks}))
     quotes = quotes_fn(symbols) if symbols else {}
     currencies = tuple(sorted(({h.currency for h in everything}
-                               | {p.currency for p in mix.picks}) - {base_currency}))
+                               | {p.currency for p in mix.picks}
+                               | {a.currency for a in cash_accounts}) - {base_currency}))
     fx = fx_fn(base_currency, currencies) if currencies else {}
 
     values, notes = holding_values(holdings, quotes, fx, base_currency)
-    gaps = analyse_gaps(mix, values, base_currency, notes)
+    cash = sum((c.value for c in cash_values(list(cash_accounts), fx, base_currency)),
+               Decimal(0))
+    gaps = analyse_gaps(mix, values, base_currency, notes, cash=cash)
     if mix.speculative and all_holdings:
         all_values, _ = holding_values(all_holdings, quotes, fx, base_currency)
         warning = portfolio_share_warning(gaps.total_value, sum(all_values.values(), Decimal(0)),
@@ -85,6 +91,7 @@ def build_recommendation(
     plan = None
     if amount:
         plan = plan_purchase(mix, values, amount, quotes, fx, base_currency,
-                             inv.brokerage_per_trade)
+                             inv.brokerage_per_trade, cash_value=cash,
+                             cash_accounts=list(cash_accounts))
     return Recommendation(category_id=category.id, category_name=category.name, mix=mix,
                           gaps=gaps, buy_plan=plan)

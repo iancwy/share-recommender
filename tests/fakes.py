@@ -6,7 +6,15 @@ from types import SimpleNamespace
 from uuid import UUID, uuid4
 
 from share_recommender.core.exchanges import EXCHANGES
-from share_recommender.core.models import Category, CategoryIn, Holding, HoldingIn, Profile
+from share_recommender.core.models import (
+    CashAccount,
+    CashAccountIn,
+    Category,
+    CategoryIn,
+    Holding,
+    HoldingIn,
+    Profile,
+)
 from share_recommender.core.preferences import CategoryPreferences, InvestorPreferences
 from share_recommender.data.base import Fundamentals, MarketDataProvider, PriceBar, Quote
 
@@ -19,6 +27,7 @@ class FakeRepository:
         general = Category(id=uuid4(), user_id=USER_ID, name="General investing")
         self.categories: dict[UUID, Category] = {general.id: general}
         self.holdings: dict[UUID, Holding] = {}
+        self.cash: dict[UUID, CashAccount] = {}
         self.preferences: InvestorPreferences | None = None
         self.category_preferences: dict[UUID, CategoryPreferences] = {}
 
@@ -52,7 +61,29 @@ class FakeRepository:
         moved = [hid for hid, h in self.holdings.items() if h.platform == old]
         for hid in moved:
             self.holdings[hid] = self.holdings[hid].model_copy(update={"platform": new})
-        return len(moved)
+        cash = [cid for cid, c in self.cash.items() if c.institution == old] if new else []
+        for cid in cash:
+            self.cash[cid] = self.cash[cid].model_copy(update={"institution": new})
+        return len(moved) + len(cash)
+
+    def list_cash_accounts(self, category_id=None):
+        rows = [c for c in self.cash.values()
+                if category_id is None or c.category_id == category_id]
+        return sorted(rows, key=lambda c: c.institution)
+
+    def create_cash_account(self, c: CashAccountIn):
+        account = CashAccount(id=uuid4(), user_id=USER_ID, **c.model_dump())
+        self.cash[account.id] = account
+        return account
+
+    def update_cash_account(self, account_id, c: CashAccountIn):
+        if account_id not in self.cash:
+            raise LookupError(account_id)
+        self.cash[account_id] = CashAccount(id=account_id, user_id=USER_ID, **c.model_dump())
+        return self.cash[account_id]
+
+    def delete_cash_account(self, account_id):
+        self.cash.pop(account_id, None)
 
     def list_categories(self):
         return sorted(self.categories.values(), key=lambda c: c.name)
@@ -74,6 +105,9 @@ class FakeRepository:
         for hid, h in self.holdings.items():
             if h.category_id == category_id:
                 self.holdings[hid] = h.model_copy(update={"category_id": None})
+        for cid, c in self.cash.items():
+            if c.category_id == category_id:
+                self.cash[cid] = c.model_copy(update={"category_id": None})
 
     def list_holdings(self, category_id=None):
         rows = [h for h in self.holdings.values()

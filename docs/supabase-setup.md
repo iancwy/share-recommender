@@ -18,6 +18,8 @@
    Week 4 adds, in this order:
    - `20261101000100_default_platform.sql`: each person's default platform for new
      holdings.
+   - `20261101000200_cash_accounts.sql`: cash in savings accounts (owner-only, like
+     holdings).
 
    (If you prefer the Supabase CLI: `supabase link --project-ref <ref>` then `supabase db push`.)
 
