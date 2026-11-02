@@ -33,7 +33,7 @@ def _titles(report, severity=None):
 
 def test_drift_is_flagged_with_a_top_up_fix():
     goal = Category(id=uuid4(), user_id=USER_ID, name="General investing")
-    # All in Australian shares against a 70/30 mix with bonds and cash.
+    # All in Australian shares against a 70/30 mix of shares and cash.
     report = _report([goal], [_h("VAS", "50", goal)])
     alert = next(f for f in report.findings if f.area == goal.name
                  and f.severity is Severity.ALERT)
@@ -55,7 +55,7 @@ def test_balanced_goal_is_ok_and_near_deadline_with_too_many_shares_alerts():
     prefs = {general.id: CategoryPreferences(horizon_years=15)}
     inv = InvestorPreferences(direct_shares="etf_only")
     mix = [_h("VAS", "23", general), _h("VGS", "40", general), _h("VGE", "7", general),
-           _h("VAF", "24", general), _h("AAA", "6", general)]
+           _h("AAA", "30", general)]
     assert "On its target mix" in _titles(_report([general], mix, inv, prefs), Severity.OK)
 
 

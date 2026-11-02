@@ -15,6 +15,16 @@
    `profiles` and `categories` each have a `preferences` column. Week 3 adds
    `20261031000000_price_cache.sql`, which creates `price_history` and `price_sync`: a daily
    price cache shared by everyone who signs in (it holds market prices, not portfolios).
+   Week 4 adds, in this order:
+   - `20261101000100_default_platform.sql`: each person's default platform for new
+     holdings.
+   - `20261101000200_cash_accounts.sql`: cash in savings accounts (owner-only, like
+     holdings).
+   - `20261101000300_dividends.sql`: dividends with franking credits (owner-only). Safe to
+     run even if an earlier draft already created the table.
+   - `20261101000400_notifications.sql`: notification settings on `profiles`, the job's
+     `recommendation_snapshots`, and the in-app `notifications` inbox (people can only read,
+     mark read and delete their own). Then see [notifications-setup.md](notifications-setup.md).
 
    (If you prefer the Supabase CLI: `supabase link --project-ref <ref>` then `supabase db push`.)
 
@@ -28,7 +38,10 @@
    - Email sign-in is on by default. Leave **Confirm email** on; Supabase's built-in email
      sender is rate limited but fine for two people.
    - Under **Authentication > URL Configuration**, set **Site URL** to
-     `http://localhost:8501` so the confirmation link brings you back to the app.
+     `http://localhost:8501` so the confirmation link brings you back to the app. Once the
+     app is deployed ([deploy.md](deploy.md)), change **Site URL** to its address (e.g.
+     `https://ian-shares.streamlit.app`) and add both that and `http://localhost:8501` under
+     **Redirect URLs**, so links work from either.
 
 5. **Create the two accounts.** Run the app (see README), use **Create account** for yourself,
    confirm the email, sign in. Repeat for your wife with her own email.

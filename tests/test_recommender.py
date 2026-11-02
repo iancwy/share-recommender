@@ -84,8 +84,10 @@ def test_mix_shape_for_long_horizon():
     w = _weights(mix)
     assert w[AssetClass.EMERGING_SHARES] == 7  # 10% of 70% growth
     assert w[AssetClass.AU_SHARES] + w[AssetClass.GLOBAL_SHARES] == 63
-    assert w[AssetClass.BONDS] == 24 and w[AssetClass.CASH] == 6
-    assert _tickers(mix) == ["VAS", "VGS", "VGE", "VAF", "AAA"]
+    assert w[AssetClass.CASH] == 30  # the whole defensive part is cash
+    assert AssetClass.CASH in w and len(w) == 4 and sum(w.values()) == 100
+    assert _tickers(mix) == ["VAS", "VGS", "VGE", "AAA"]
+    assert any("all cash" in r for r in mix.reasons)
     assert mix.reasons
 
 
@@ -148,7 +150,7 @@ def test_unfillable_slices_warn():
     inv = InvestorPreferences(markets=["LSE"], direct_shares=DirectShares.ETF_ONLY)
     mix = target_mix(_cat(), inv, CategoryPreferences(), TODAY)
     assert "ISF" in _tickers(mix)
-    assert any("Bonds" in w or "bonds" in w for w in mix.warnings)
+    assert any("cash" in w for w in mix.warnings)  # no cash fund on the LSE
 
 
 # Gaps -------------------------------------------------------------------------
@@ -167,7 +169,7 @@ def test_gaps_compare_holdings_with_target():
     assert by_key["au_shares"].current_value == 2370
     assert by_key["global_shares"].current_value == 2550
     assert by_key["emerging_shares"].current_value == 80
-    assert by_key["bonds"].difference == by_key["bonds"].target_value > 0
+    assert by_key["cash"].difference == by_key["cash"].target_value > 0
     assert any("MYSTERY" in n for n in gaps.notes)
     assert any("Diversified funds" in n for n in gaps.notes)
 
@@ -193,8 +195,8 @@ def test_buy_plan_from_scratch_follows_the_mix():
     mix = target_mix(_cat(), ETF_ONLY, CategoryPreferences(horizon_years=15), TODAY)
     plan = _plan(mix, "10000")
     units = {o.ticker: o.units for o in plan.orders}
-    # 100 per unit: VAS 22.5%, VGS 40.5%, VGE 7%, VAF 24%, AAA 6% of 10,000
-    assert units == {"VAS": 22, "VGS": 41, "VGE": 7, "VAF": 24, "AAA": 6}
+    # 100 per unit: VAS 22.5%, VGS 40.5%, VGE 7%, AAA 30% of 10,000
+    assert units == {"VAS": 22, "VGS": 41, "VGE": 7, "AAA": 30}
     spent = sum(o.total_cost for o in plan.orders)
     assert spent + plan.leftover == 10000 and 0 <= plan.leftover < 100
 
@@ -212,7 +214,7 @@ def test_buy_plan_fills_gaps_first_and_never_overspends():
 def test_buy_plan_drops_tiny_trades():
     mix = target_mix(_cat(), ETF_ONLY, CategoryPreferences(horizon_years=15), TODAY)
     plan = _plan(mix, "2000")
-    assert {o.ticker for o in plan.orders} <= {"VGS", "VAF", "VAS"}
+    assert {o.ticker for o in plan.orders} <= {"VGS", "AAA", "VAS"}
     assert any("too small" in n for n in plan.notes)
     assert _plan(mix, "300").orders == []
 
@@ -251,7 +253,7 @@ def test_speculative_goal_is_all_high_growth_shares():
                      TODAY)
     assert mix.speculative and mix.growth_pct == 100
     assert sum(p.weight for p in mix.picks) == 100
-    assert not {AssetClass.BONDS, AssetClass.CASH} & set(_weights(mix))
+    assert AssetClass.CASH not in _weights(mix)
     etfs = [p for p in mix.picks if p.kind is Kind.ETF]
     shares = [p for p in mix.picks if p.kind is Kind.SHARE]
     assert [p.ticker for p in etfs] == ["RBTZ", "SEMI"]

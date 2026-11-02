@@ -4,15 +4,31 @@ The repository never filters by user id itself: row-level security in Postgres
 does that, so a bug here cannot leak one person's portfolio to another.
 """
 
+from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from share_recommender.core.models import Category, CategoryIn, Holding, HoldingIn, Profile
+from share_recommender.core.models import (
+    CashAccount,
+    CashAccountIn,
+    Category,
+    CategoryIn,
+    Dividend,
+    DividendIn,
+    Holding,
+    HoldingIn,
+    Profile,
+    ProfileIn,
+)
 from share_recommender.core.preferences import CategoryPreferences, InvestorPreferences
 from supabase import Client
 
 
-def _payload(model: CategoryIn | HoldingIn) -> dict[str, Any]:
+def _now() -> str:
+    return datetime.now().astimezone().isoformat()
+
+
+def _payload(model: CategoryIn | HoldingIn | CashAccountIn | DividendIn) -> dict[str, Any]:
     return model.model_dump(mode="json")
 
 
@@ -26,18 +42,58 @@ class PortfolioRepository:
         rows = self._db.table("profiles").select("*").limit(1).execute().data
         return Profile.model_validate(rows[0]) if rows else None
 
-    def update_profile(self, display_name: str | None, base_currency: str) -> Profile:
+    def update_profile(self, update: ProfileIn) -> Profile:
         profile = self.get_profile()
         if profile is None:
             raise LookupError("Profile not found")
         rows = (
             self._db.table("profiles")
-            .update({"display_name": display_name, "base_currency": base_currency})
+            .update(update.model_dump(mode="json"))
             .eq("id", str(profile.id))
             .execute()
             .data
         )
         return Profile.model_validate(rows[0])
+
+    def rename_platform(self, old: str, new: str | None) -> int:
+        """Move every holding and cash account on platform ``old`` to ``new``.
+
+        Cash accounts need a name, so they keep ``old`` if ``new`` is blank.
+        Returns how many moved.
+        """
+        new = (new or "").strip() or None
+        rows = (self._db.table("holdings").update({"platform": new}).eq("platform", old)
+                .execute().data)
+        if new:
+            rows += (self._db.table("cash_accounts").update({"institution": new})
+                     .eq("institution", old).execute().data)
+        return len(rows)
+
+    # Notifications (created by the scheduled job; people can only read, mark read, delete)
+
+    def list_notifications(self, limit: int = 50) -> list[dict]:
+        return (self._db.table("notifications").select("*").order("created_at", desc=True)
+                .limit(limit).execute().data)
+
+    def unread_count(self) -> int:
+        return len(self._db.table("notifications").select("id").is_("read_at", "null")
+                   .execute().data)
+
+    def mark_notification_read(self, notification_id: str) -> None:
+        (self._db.table("notifications").update({"read_at": _now()})
+         .eq("id", notification_id).execute())
+
+    def mark_all_notifications_read(self) -> None:
+        (self._db.table("notifications").update({"read_at": _now()})
+         .is_("read_at", "null").execute())
+
+    def delete_notification(self, notification_id: str) -> None:
+        self._db.table("notifications").delete().eq("id", notification_id).execute()
+
+    def get_snapshots(self) -> dict[str, dict]:
+        """The job's last recommendation snapshots, for the 'check for changes' preview."""
+        rows = self._db.table("recommendation_snapshots").select("scope, payload").execute().data
+        return {r["scope"]: r["payload"] for r in rows}
 
     # Interview answers ---------------------------------------------------
     # An empty JSON object means the interview hasn't been done, returned as None.
@@ -138,3 +194,44 @@ class PortfolioRepository:
 
     def delete_holding(self, holding_id: UUID) -> None:
         self._db.table("holdings").delete().eq("id", str(holding_id)).execute()
+
+    # Cash accounts -------------------------------------------------------
+
+    def list_cash_accounts(self, category_id: UUID | None = None) -> list[CashAccount]:
+        query = self._db.table("cash_accounts").select("*")
+        if category_id is not None:
+            query = query.eq("category_id", str(category_id))
+        rows = query.order("institution").execute().data
+        return [CashAccount.model_validate(r) for r in rows]
+
+    def create_cash_account(self, account: CashAccountIn) -> CashAccount:
+        rows = self._db.table("cash_accounts").insert(_payload(account)).execute().data
+        return CashAccount.model_validate(rows[0])
+
+    def update_cash_account(self, account_id: UUID, account: CashAccountIn) -> CashAccount:
+        rows = (
+            self._db.table("cash_accounts")
+            .update(_payload(account))
+            .eq("id", str(account_id))
+            .execute()
+            .data
+        )
+        if not rows:
+            raise LookupError(f"Cash account {account_id} not found")
+        return CashAccount.model_validate(rows[0])
+
+    def delete_cash_account(self, account_id: UUID) -> None:
+        self._db.table("cash_accounts").delete().eq("id", str(account_id)).execute()
+
+    # Dividends -----------------------------------------------------------
+
+    def list_dividends(self) -> list[Dividend]:
+        rows = self._db.table("dividends").select("*").order("pay_date", desc=True).execute().data
+        return [Dividend.model_validate(r) for r in rows]
+
+    def create_dividend(self, dividend: DividendIn) -> Dividend:
+        rows = self._db.table("dividends").insert(_payload(dividend)).execute().data
+        return Dividend.model_validate(rows[0])
+
+    def delete_dividend(self, dividend_id: UUID) -> None:
+        self._db.table("dividends").delete().eq("id", str(dividend_id)).execute()

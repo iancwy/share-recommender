@@ -18,7 +18,18 @@ from pydantic import BaseModel
 from share_recommender.api.deps import MarketData, PriceStore, Repo
 from share_recommender.core.exchanges import EXCHANGES
 from share_recommender.core.importer import detect, parse_rows, read_csv
-from share_recommender.core.models import Category, CategoryIn, Holding, HoldingIn, Profile
+from share_recommender.core.models import (
+    CashAccount,
+    CashAccountIn,
+    Category,
+    CategoryIn,
+    Dividend,
+    DividendIn,
+    Holding,
+    HoldingIn,
+    Profile,
+    ProfileIn,
+)
 from share_recommender.core.preferences import CategoryPreferences, InvestorPreferences
 from share_recommender.core.recommender import Recommendation
 from share_recommender.data import Quote
@@ -58,6 +69,11 @@ def me(repo: Repo) -> Profile:
     if profile is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Profile not found")
     return profile
+
+
+@app.put("/me", response_model=Profile)
+def update_me(body: ProfileIn, repo: Repo) -> Profile:
+    return repo.update_profile(body)
 
 
 # Preferences interview ------------------------------------------------------
@@ -162,8 +178,64 @@ def get_recommendation(
     return build_recommendation(
         category, inv, prefs, [h for h in all_holdings if h.category_id == category_id],
         profile.base_currency if profile else "AUD", *provider_fns(market), amount=amount,
-        all_holdings=all_holdings,
+        all_holdings=all_holdings, cash_accounts=repo.list_cash_accounts(category_id),
     )
+
+
+# Notifications --------------------------------------------------------------
+
+@app.get("/notifications")
+def list_notifications(repo: Repo) -> list[dict]:
+    return repo.list_notifications()
+
+
+@app.post("/notifications/{notification_id}/read", status_code=status.HTTP_204_NO_CONTENT)
+def read_notification(notification_id: UUID, repo: Repo) -> None:
+    repo.mark_notification_read(str(notification_id))
+
+
+@app.delete("/notifications/{notification_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_notification(notification_id: UUID, repo: Repo) -> None:
+    repo.delete_notification(str(notification_id))
+
+
+# Dividends ------------------------------------------------------------------
+
+@app.get("/dividends", response_model=list[Dividend])
+def list_dividends(repo: Repo) -> list[Dividend]:
+    return repo.list_dividends()
+
+
+@app.post("/dividends", response_model=Dividend, status_code=status.HTTP_201_CREATED)
+def create_dividend(body: DividendIn, repo: Repo) -> Dividend:
+    return repo.create_dividend(body)
+
+
+@app.delete("/dividends/{dividend_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_dividend(dividend_id: UUID, repo: Repo) -> None:
+    repo.delete_dividend(dividend_id)
+
+
+# Cash accounts --------------------------------------------------------------
+
+@app.get("/cash-accounts", response_model=list[CashAccount])
+def list_cash_accounts(repo: Repo, category_id: UUID | None = None) -> list[CashAccount]:
+    return repo.list_cash_accounts(category_id)
+
+
+@app.post("/cash-accounts", response_model=CashAccount, status_code=status.HTTP_201_CREATED)
+def create_cash_account(body: CashAccountIn, repo: Repo) -> CashAccount:
+    return repo.create_cash_account(body)
+
+
+@app.put("/cash-accounts/{account_id}", response_model=CashAccount)
+def update_cash_account(account_id: UUID, body: CashAccountIn, repo: Repo) -> CashAccount:
+    return repo.update_cash_account(account_id, body)
+
+
+@app.delete("/cash-accounts/{account_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_cash_account(account_id: UUID, repo: Repo) -> None:
+    repo.delete_cash_account(account_id)
 
 
 # Dashboard, health check and import ------------------------------------------
@@ -180,7 +252,8 @@ def get_portfolio_history(
 ) -> list[dict]:
     """Portfolio value and money invested over time, in base currency."""
     holdings = repo.list_holdings()
-    if not holdings:
+    accounts = repo.list_cash_accounts()
+    if not holdings and not accounts:
         return []
     history = CachedHistory(market, store)
 
@@ -189,9 +262,10 @@ def get_portfolio_history(
                 {c: history.fx_history(base, c, start, end) for c in currencies})
 
     today = date.today()
-    first = min(h.buy_date for h in holdings)
+    first = min([h.buy_date for h in holdings] + [a.as_of for a in accounts])
     start = max(first, today - timedelta(days=days)) if days else first
-    return [asdict(p) for p in portfolio_history(holdings, _base(repo), start, today, fetch)]
+    return [asdict(p) for p in portfolio_history(holdings, _base(repo), start, today, fetch,
+                                                 cash=accounts)]
 
 
 @app.get("/health-check")
@@ -199,7 +273,8 @@ def get_health_check(repo: Repo, market: MarketData) -> dict:
     categories = repo.list_categories()
     report = health_report(categories, repo.list_holdings(), repo.get_preferences(),
                            {c.id: repo.get_category_preferences(c.id) for c in categories},
-                           _base(repo), *provider_fns(market))
+                           _base(repo), *provider_fns(market),
+                           cash_accounts=repo.list_cash_accounts())
     return {"findings": [asdict(f) for f in report.findings],
             "platforms": [asdict(p) | {"fees_pct": p.fees_pct} for p in report.platforms]}
 

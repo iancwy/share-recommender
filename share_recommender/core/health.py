@@ -5,12 +5,13 @@ never suggests selling, so it never triggers capital gains tax. The thresholds a
 constants so they're easy to change.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from decimal import Decimal
 from enum import StrEnum
+from uuid import UUID
 
 from share_recommender.core.models import Category
-from share_recommender.core.performance import GoalProgress, HoldingValue
+from share_recommender.core.performance import CashValue, GoalProgress, HoldingValue
 from share_recommender.core.recommender import Recommendation
 from share_recommender.core.universe import GROWTH_CLASSES, Kind, lookup
 
@@ -60,6 +61,8 @@ class PlatformSummary:
 class HealthReport:
     findings: list[Finding]
     platforms: list[PlatformSummary]
+    # Each goal's recommendation, built along the way (reused by the notification job).
+    recommendations: dict[UUID, Recommendation] = field(default_factory=dict)
 
     def count(self, severity: Severity) -> int:
         return sum(1 for f in self.findings if f.severity is severity)
@@ -109,7 +112,7 @@ def check_goal(category: Category, rec: Recommendation, progress: GoalProgress,
                 f"The money is needed in about {progress.years_left:g} years, but {growth_now:g}% "
                 f"is in shares against a target of {rec.mix.growth_pct}%. A market fall now "
                 "would have little time to recover.",
-                "Put new money into the cash and bond picks until it's back on target."))
+                "Put new money into cash until it's back on target."))
 
     if progress.target is not None and progress.on_track is not None:
         if progress.on_track:
@@ -133,14 +136,15 @@ def check_goal(category: Category, rec: Recommendation, progress: GoalProgress,
 
 # Portfolio and platforms -------------------------------------------------------
 
-def check_portfolio(values: list[HoldingValue], base: str, preferences_done: bool
-                    ) -> list[Finding]:
+def check_portfolio(values: list[HoldingValue], base: str, preferences_done: bool,
+                    cash: list[CashValue] = ()) -> list[Finding]:
+    """Checks across everything. Cash counts in the total but is never a "company"."""
     out = []
     if not preferences_done:
         out.append(Finding(Severity.INFO, "Portfolio", "Preferences not answered",
                            "Goal checks use default answers until you do.",
                            "Answer the questionnaire on the Preferences page."))
-    total = sum((v.value for v in values), Decimal(0))
+    total = sum((v.value for v in values), Decimal(0)) + sum((c.value for c in cash), Decimal(0))
     if not total:
         return out
 
@@ -170,7 +174,8 @@ def check_portfolio(values: list[HoldingValue], base: str, preferences_done: boo
                            f"{len(uncategorised)} holding(s) not in a goal",
                            "They count towards totals but not towards any goal's checks.",
                            "Give them a category on the Holdings page."))
-    foreign = sum((v.value for v in values if v.holding.currency != base), Decimal(0))
+    foreign = (sum((v.value for v in values if v.holding.currency != base), Decimal(0))
+               + sum((c.value for c in cash if c.account.currency != base), Decimal(0)))
     if foreign:
         out.append(Finding(Severity.OK, "Portfolio", "Currency exposure",
                            f"{foreign / total * 100:.0f}% of your portfolio is in currencies other "
@@ -178,18 +183,23 @@ def check_portfolio(values: list[HoldingValue], base: str, preferences_done: boo
     return out
 
 
-def platform_summaries(values: list[HoldingValue]) -> list[PlatformSummary]:
-    total = sum((v.value for v in values), Decimal(0))
-    groups: dict[str, list[HoldingValue]] = {}
-    for v in values:
-        groups.setdefault(v.holding.platform or "No platform set", []).append(v)
+def platform_summaries(values: list[HoldingValue], cash: list[CashValue] = ()
+                       ) -> list[PlatformSummary]:
+    """Per platform (a cash account's bank counts as its platform). Cash adds to value and
+    share, but not to money invested or fees, so it can't hide brokerage costs."""
+    total = sum((v.value for v in values), Decimal(0)) + sum((c.value for c in cash), Decimal(0))
+    names = {v.holding.platform or "No platform set" for v in values} | {
+        c.account.institution for c in cash}
     out = []
-    for name, vs in groups.items():
-        value = sum((v.value for v in vs), Decimal(0))
+    for name in names:
+        vs = [v for v in values if (v.holding.platform or "No platform set") == name]
+        cs = [c for c in cash if c.account.institution == name]
+        value = sum((v.value for v in vs), Decimal(0)) + sum((c.value for c in cs), Decimal(0))
         fees = sum((v.holding.fees * v.cost / v.holding.cost_base for v in vs), Decimal(0))
         out.append(PlatformSummary(
             name, value, (value / total * 100).quantize(Decimal("0.1")) if total else Decimal(0),
-            len(vs), sum((v.cost for v in vs), Decimal(0)), fees.quantize(Decimal("0.01"))))
+            len(vs) + len(cs), sum((v.cost for v in vs), Decimal(0)),
+            fees.quantize(Decimal("0.01"))))
     return sorted(out, key=lambda p: p.value, reverse=True)
 
 
@@ -201,6 +211,8 @@ def check_platforms(summaries: list[PlatformSummary]) -> list[Finding]:
                                f"{p.holdings} holding(s) without a platform",
                                "They can't be included in the per-platform checks.",
                                "Set the platform on the Holdings page."))
+        elif not p.invested:
+            continue  # only cash here: no brokerage to check
         elif p.fees_pct >= FEES_WARN:
             out.append(Finding(
                 Severity.WARN, p.platform, f"Brokerage is {p.fees_pct:g}% of what you invested",

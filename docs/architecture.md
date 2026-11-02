@@ -46,7 +46,8 @@ A holding can only point at a category owned by the same user (composite foreign
 
 ## Data model
 
-- `profiles`: display name, base currency.
+- `profiles`: display name, base currency, default platform, and notification settings
+  (`notify_email`, `notify_frequency`).
 - `categories`: goal buckets, each with optional target amount, target date and a risk level.
 - `holdings`: one row per purchase (parcel): ticker, exchange, units, buy price, buy date,
   fees, platform label (e.g. CMC Markets), category, notes. Deleting a category keeps its
@@ -58,6 +59,14 @@ A holding can only point at a category owned by the same user (composite foreign
 - `profiles.preferences` and `categories.preferences` (Week 2): interview answers as JSON,
   validated by `InvestorPreferences` and `CategoryPreferences` in `core/preferences.py`.
   An empty object means the interview hasn't been done.
+- `cash_accounts` (Week 4): cash in savings accounts, entered by hand: bank or platform,
+  account name, balance, interest rate, currency, the date the balance was checked, and a
+  goal (same composite foreign key as holdings, so deleting a goal keeps the account).
+- `dividends` (Week 4): one row per payment, with franking credits, foreign tax withheld
+  and whether it was reinvested.
+- `recommendation_snapshots` and `notifications` (Week 4): the job's last snapshot per
+  person and scope, and the in-app inbox. Only the job (service key) writes them; people can
+  read their own, mark notifications read (a column grant allows only `read_at`) and delete.
 
 Schema: [`supabase/migrations/`](../supabase/migrations/), run oldest first.
 
@@ -91,8 +100,9 @@ For one goal category:
    year, then at most 10% under 2 years, 30% under 3, 50% under 5, 70% under 7, 85% under 10.
    The horizon comes from the target date if set, otherwise the interview answer.
 2. **Asset classes.** Shares split into Australian, international and (from 60% shares)
-   10% emerging markets, using the home-market answer. Defensive splits into cash and
-   bonds: all cash under 2 years, 40% cash under 5, 20% cash beyond.
+   10% emerging markets, using the home-market answer. The defensive part is all cash
+   (high-interest savings or a cash ETF such as AAA or BILL): the app tracks shares, ETFs
+   and cash only.
 3. **Picks.** One ETF per slice from the curated list in `core/universe.py`: one already held
    in the category, else a sustainability-screened one if the person has exclusions, else an
    income one for income seekers, else the broadest on their chosen markets (ASX first). If
@@ -108,7 +118,7 @@ For one goal category:
 
 **Speculative goals** work differently. A goal is speculative when its interview answer says
 so, or, if it hasn't been answered, when the category is named "Speculative". It is all in
-shares, with no bonds or cash, invested in the themes chosen in the interview (AI and
+shares, with no cash, invested in the themes chosen in the interview (AI and
 semiconductors, cybersecurity, clean energy, biotech):
 
 - 30% across up to 2 theme ETFs (all ETFs, up to 3, for someone who chose "ETFs only"), and
@@ -132,7 +142,7 @@ never changes the numbers.
   that day's close (daily up to about 13 months, weekly beyond), converted at that day's
   exchange rate; money invested is cost including fees at the rate on the buy date.
   Breakdowns fold anything past the top 10 into "Other". Goal progress projects the current
-  value to the target date at an assumed 7% a year for shares and 3.5% for bonds and cash,
+  value to the target date at an assumed 7% a year for shares and 3.5% for cash,
   and works out the monthly top-up needed. These are illustrations, not forecasts.
 - **Health check** (`core/health.py`): per goal, drift from the target mix (warning at 5
   points, alert at 10), too much in shares within 2 years of a deadline, and on or behind
@@ -155,8 +165,45 @@ never changes the numbers.
 - **Classification**: holdings not on the curated list count as one company's shares
   (Australian on the ASX, international elsewhere). Diversified funds such as DHHF and VDHG
   are split across asset classes by their approximate target allocation, in the gaps, the
-  dashboard breakdown and the goal projections.
+  dashboard breakdown and the goal projections; VDHG's 10% fixed interest counts as cash.
+  The dashboard can also break holdings down by **type**: shares, ETFs and cash.
 
-## Plan for later weeks
+## Cash, notifications and deploy (Week 4)
 
-- Week 4: notifications (email first) and polish.
+- **Shares, ETFs and cash only.** That's all the app tracks. A goal's defensive part is
+  all cash: savings accounts, or a cash ETF such as AAA or BILL. Dashboard breakdowns include
+  "Type" (shares, ETFs, cash) alongside asset class.
+- **Platforms** are free text. Each person has a default for new holdings and imports
+  (CMC Markets if unset), and "Rename a platform" moves every matching holding and cash
+  account.
+- **Cash accounts** are valued at their balance and passed alongside holdings as
+  `CashValue`s (`core/performance.py`), never as fake tickers. They count in totals and in
+  money invested (so they don't change the gain), in every breakdown, and in value over time
+  as a flat line from the date the balance was last checked. A goal's accounts fill its cash
+  slice in the gaps; the buy plan tops up the best-paying account instead of buying a cash
+  ETF (`BuyPlan.cash_topups`). Projections grow each account at its own interest rate and
+  holdings at the assumptions. The health check counts cash in the portfolio total and in
+  platform shares, but never as a company and never in brokerage percentages.
+- **Notifications** (`core/notifications.py`, `notifier.py`, `jobs/notify.py`). For each goal,
+  and once for the portfolio, a snapshot records the recommended picks and weights and the
+  Warning and Alert findings. Compared with the last snapshot, a notification is due when a
+  pick is added or removed, a weight moves 5 points or more, or a new Warning or Alert
+  appears (numbers are stripped from finding titles, so a changing figure isn't a new issue).
+  Cleared findings are mentioned as good news but never trigger one. Extras: a price move of
+  5% in a day (10% in a week for weekly people) and goal deadline reminders at 24, 12, 6, 3
+  and 1 month(s), remembered in the portfolio snapshot so each is sent once. The first run
+  for a person stores a baseline only. The job runs at 07:00 UTC on weekdays from GitHub
+  Actions, processes people whose frequency is due (daily: weekdays; weekly: Mondays, Sydney
+  time), adds one in-app notification per goal with changes, sends one email combining them
+  (SMTP, `mailer.py`) and saves the new snapshots. It uses the service key through
+  `db/admin.py`, where every query filters by `user_id`, with settings in `JobSettings` so
+  the app can never read the key. Setup: [notifications-setup.md](notifications-setup.md).
+- **Deploy**: Streamlit Community Cloud runs `streamlit_app.py`, which runs the real app on
+  every rerun. Settings come from Cloud secrets as environment variables. See
+  [deploy.md](deploy.md).
+
+## Possible later work
+
+- Selling: reduce parcels and record capital gains, including sales from broker exports.
+- Dividend import from broker statements.
+- Remembering the sign-in on the phone between visits.

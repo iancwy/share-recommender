@@ -6,7 +6,17 @@ from types import SimpleNamespace
 from uuid import UUID, uuid4
 
 from share_recommender.core.exchanges import EXCHANGES
-from share_recommender.core.models import Category, CategoryIn, Holding, HoldingIn, Profile
+from share_recommender.core.models import (
+    CashAccount,
+    CashAccountIn,
+    Category,
+    CategoryIn,
+    Dividend,
+    DividendIn,
+    Holding,
+    HoldingIn,
+    Profile,
+)
 from share_recommender.core.preferences import CategoryPreferences, InvestorPreferences
 from share_recommender.data.base import Fundamentals, MarketDataProvider, PriceBar, Quote
 
@@ -19,8 +29,44 @@ class FakeRepository:
         general = Category(id=uuid4(), user_id=USER_ID, name="General investing")
         self.categories: dict[UUID, Category] = {general.id: general}
         self.holdings: dict[UUID, Holding] = {}
+        self.cash: dict[UUID, CashAccount] = {}
+        self.dividends: dict[UUID, Dividend] = {}
         self.preferences: InvestorPreferences | None = None
         self.category_preferences: dict[UUID, CategoryPreferences] = {}
+        self.notifications: list[dict] = []
+        self.snapshots: dict[str, dict] = {}
+
+    def list_notifications(self, limit=50):
+        return sorted(self.notifications, key=lambda n: n["created_at"], reverse=True)[:limit]
+
+    def unread_count(self):
+        return sum(1 for n in self.notifications if not n.get("read_at"))
+
+    def mark_notification_read(self, notification_id):
+        for n in self.notifications:
+            if n["id"] == notification_id:
+                n["read_at"] = "2026-11-01T18:00:00+11:00"
+
+    def mark_all_notifications_read(self):
+        for n in self.notifications:
+            n["read_at"] = n.get("read_at") or "2026-11-01T18:00:00+11:00"
+
+    def delete_notification(self, notification_id):
+        self.notifications = [n for n in self.notifications if n["id"] != notification_id]
+
+    def get_snapshots(self):
+        return self.snapshots
+
+    def list_dividends(self):
+        return sorted(self.dividends.values(), key=lambda d: d.pay_date, reverse=True)
+
+    def create_dividend(self, d: DividendIn):
+        dividend = Dividend(id=uuid4(), user_id=USER_ID, **d.model_dump())
+        self.dividends[dividend.id] = dividend
+        return dividend
+
+    def delete_dividend(self, dividend_id):
+        self.dividends.pop(dividend_id, None)
 
     def get_preferences(self):
         return self.preferences
@@ -43,9 +89,38 @@ class FakeRepository:
     def get_profile(self):
         return self.profile
 
-    def update_profile(self, display_name, base_currency):
-        self.profile = Profile(id=USER_ID, display_name=display_name, base_currency=base_currency)
+    def update_profile(self, update):
+        self.profile = Profile(id=USER_ID, **update.model_dump())
         return self.profile
+
+    def rename_platform(self, old, new):
+        new = (new or "").strip() or None
+        moved = [hid for hid, h in self.holdings.items() if h.platform == old]
+        for hid in moved:
+            self.holdings[hid] = self.holdings[hid].model_copy(update={"platform": new})
+        cash = [cid for cid, c in self.cash.items() if c.institution == old] if new else []
+        for cid in cash:
+            self.cash[cid] = self.cash[cid].model_copy(update={"institution": new})
+        return len(moved) + len(cash)
+
+    def list_cash_accounts(self, category_id=None):
+        rows = [c for c in self.cash.values()
+                if category_id is None or c.category_id == category_id]
+        return sorted(rows, key=lambda c: c.institution)
+
+    def create_cash_account(self, c: CashAccountIn):
+        account = CashAccount(id=uuid4(), user_id=USER_ID, **c.model_dump())
+        self.cash[account.id] = account
+        return account
+
+    def update_cash_account(self, account_id, c: CashAccountIn):
+        if account_id not in self.cash:
+            raise LookupError(account_id)
+        self.cash[account_id] = CashAccount(id=account_id, user_id=USER_ID, **c.model_dump())
+        return self.cash[account_id]
+
+    def delete_cash_account(self, account_id):
+        self.cash.pop(account_id, None)
 
     def list_categories(self):
         return sorted(self.categories.values(), key=lambda c: c.name)
@@ -67,6 +142,9 @@ class FakeRepository:
         for hid, h in self.holdings.items():
             if h.category_id == category_id:
                 self.holdings[hid] = h.model_copy(update={"category_id": None})
+        for cid, c in self.cash.items():
+            if c.category_id == category_id:
+                self.cash[cid] = c.model_copy(update={"category_id": None})
 
     def list_holdings(self, category_id=None):
         rows = [h for h in self.holdings.values()

@@ -1,0 +1,11 @@
+# Streamlit settings. The [theme] values are the current look, kept in step with
+# share_recommender/ui/theme.py. TODO: from Ian's design (docs/design/).
+# No "base" is set, so the app still follows each viewer's light or dark preference.
+
+[theme]
+primaryColor = "#ff4b4b"
+font = "sans serif"
+
+[server]
+# Uploads are broker CSV exports; they're small.
+maxUploadSize = 10

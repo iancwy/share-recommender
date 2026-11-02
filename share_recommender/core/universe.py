@@ -17,7 +17,6 @@ class AssetClass(StrEnum):
     AU_SHARES = "au_shares"
     GLOBAL_SHARES = "global_shares"
     EMERGING_SHARES = "emerging_shares"
-    BONDS = "bonds"
     CASH = "cash"
 
 
@@ -25,7 +24,6 @@ ASSET_CLASS_LABELS: dict[AssetClass, str] = {
     AssetClass.AU_SHARES: "Australian shares",
     AssetClass.GLOBAL_SHARES: "International shares",
     AssetClass.EMERGING_SHARES: "Emerging markets shares",
-    AssetClass.BONDS: "Bonds",
     AssetClass.CASH: "Cash",
 }
 
@@ -116,8 +114,8 @@ def _share(ticker, exchange, name, sector, *excluded_by: Exclusion,
                       excluded_by=frozenset(excluded_by), themes=frozenset(themes))
 
 
-A, G, E, B, C = (AssetClass.AU_SHARES, AssetClass.GLOBAL_SHARES, AssetClass.EMERGING_SHARES,
-                 AssetClass.BONDS, AssetClass.CASH)
+A, G, E, C = (AssetClass.AU_SHARES, AssetClass.GLOBAL_SHARES, AssetClass.EMERGING_SHARES,
+              AssetClass.CASH)
 
 
 def _diversified(ticker, name, **split: str) -> Instrument:
@@ -154,10 +152,6 @@ ETFS: list[Instrument] = [
     _etf("VGE", "ASX", "Vanguard FTSE Emerging Markets Shares ETF", E),
     _etf("IEM", "ASX", "iShares MSCI Emerging Markets ETF", E),
     _etf("VWO", "NYSE", "Vanguard FTSE Emerging Markets ETF", E),
-    _etf("VAF", "ASX", "Vanguard Australian Fixed Interest Index ETF", B),
-    _etf("IAF", "ASX", "iShares Core Composite Bond ETF", B),
-    _etf("VGB", "ASX", "Vanguard Australian Government Bond Index ETF", B),
-    _etf("BND", "NASDAQ", "Vanguard Total Bond Market ETF", B),
     _etf("AAA", "ASX", "Betashares Australian High Interest Cash ETF", C),
     _etf("BILL", "ASX", "iShares Core Cash ETF", C),
     _etf("SGOV", "NYSE", "iShares 0-3 Month Treasury Bond ETF", C),
@@ -182,12 +176,10 @@ ETFS: list[Instrument] = [
     # managers adjust these from time to time, so the split is a close guide, not exact.
     _diversified("DHHF", "Betashares Diversified All Growth ETF",
                  au_shares="0.37", global_shares="0.55", emerging_shares="0.08"),
+    # VDHG's 10% defensive slice is really fixed interest; it's shown as cash because the
+    # app only tracks shares and cash.
     _diversified("VDHG", "Vanguard Diversified High Growth Index ETF",
-                 au_shares="0.36", global_shares="0.47", emerging_shares="0.07", bonds="0.10"),
-    _diversified("VDGR", "Vanguard Diversified Growth Index ETF",
-                 au_shares="0.28", global_shares="0.36", emerging_shares="0.06", bonds="0.30"),
-    _diversified("VDBA", "Vanguard Diversified Balanced Index ETF",
-                 au_shares="0.20", global_shares="0.26", emerging_shares="0.04", bonds="0.50"),
+                 au_shares="0.36", global_shares="0.47", emerging_shares="0.07", cash="0.10"),
 ]
 
 SHARES: list[Instrument] = [

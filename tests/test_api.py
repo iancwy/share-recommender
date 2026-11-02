@@ -101,3 +101,52 @@ def test_dashboard_health_and_import_endpoints(client):
 
     bad = client.post("/holdings/import/preview", json={"csv": "Date,Code\n01/01/2026,VAS\n"})
     assert bad.status_code == 422
+
+
+def test_update_me_with_default_platform(client):
+    r = client.put("/me", json={"display_name": "Ian", "base_currency": "AUD",
+                                "default_platform": " Stake "})
+    assert r.status_code == 200 and r.json()["default_platform"] == "Stake"
+    assert client.put("/me", json={"base_currency": "aud"}).status_code == 422
+
+
+def test_cash_accounts(client):
+    body = {"institution": "ING", "account_name": "Savings Maximiser", "balance": "5000",
+            "interest_rate": "5.5"}
+    created = client.post("/cash-accounts", json=body)
+    assert created.status_code == 201
+    account_id = created.json()["id"]
+    updated = client.put(f"/cash-accounts/{account_id}", json=body | {"balance": "6000"})
+    assert updated.json()["balance"] == "6000"
+    assert len(client.get("/cash-accounts").json()) == 1
+    assert client.post("/cash-accounts", json=body | {"balance": "-1"}).status_code == 422
+    assert client.delete(f"/cash-accounts/{account_id}").status_code == 204
+    assert client.get("/cash-accounts").json() == []
+
+
+def test_dividends(client):
+    body = {"ticker": "vas", "exchange": "ASX", "pay_date": "2026-07-15", "amount": "120.50",
+            "franking_credits": "30"}
+    created = client.post("/dividends", json=body)
+    assert created.status_code == 201 and created.json()["ticker"] == "VAS"
+    assert len(client.get("/dividends").json()) == 1
+    assert client.delete(f"/dividends/{created.json()['id']}").status_code == 204
+    assert client.post("/dividends", json=body | {"amount": "0"}).status_code == 422
+
+
+def test_notifications_endpoints(client):
+    from uuid import uuid4
+
+    repo = app.dependency_overrides[get_repository]()
+    note_id = str(uuid4())
+    repo.notifications = [{"id": note_id, "title": "t", "body": "b", "read_at": None,
+                           "created_at": "2026-11-02T18:00:00+11:00"}]
+    assert client.get("/notifications").json()[0]["id"] == note_id
+    assert client.post(f"/notifications/{note_id}/read").status_code == 204
+    assert repo.unread_count() == 0
+    assert client.delete(f"/notifications/{note_id}").status_code == 204
+    assert client.get("/notifications").json() == []
+
+    me = client.put("/me", json={"notify_frequency": "daily", "notify_email": False}).json()
+    assert (me["notify_frequency"], me["notify_email"]) == ("daily", False)
+    assert client.put("/me", json={"notify_frequency": "hourly"}).status_code == 422
