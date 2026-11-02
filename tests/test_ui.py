@@ -226,7 +226,8 @@ def test_health_check_page(run_app, repo):
     _go(at, "Health check").run()
     assert not at.exception
     labels = [m.label for m in at.metric]
-    assert labels == ["⛔ Alert", "⚠️ Warning", "ℹ️ Info", "✅ OK"]
+    assert labels == [":red[:material/report:] Alert", ":orange[:material/warning:] Warning",
+                      ":blue[:material/info:] Info", ":green[:material/check_circle:] OK"]
     text = " ".join(m.value for m in at.markdown)
     assert "in one company (CBA)" in text and "Preferences not answered" in text
 

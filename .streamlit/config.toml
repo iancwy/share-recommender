@@ -1,10 +1,62 @@
-# Streamlit settings. The [theme] values are the current look, kept in step with
-# share_recommender/ui/theme.py. TODO: from Ian's design (docs/design/).
-# No "base" is set, so the app still follows each viewer's light or dark preference.
+# Streamlit settings. The [theme] values are Ian's design (docs/design/README.md), kept in
+# step with share_recommender/ui/theme.py.
+# No "base" is set, so the app follows each viewer's light or dark preference and picks
+# [theme.light] or [theme.dark] below.
 
 [theme]
-primaryColor = "#ff4b4b"
-font = "sans serif"
+font = "Inter:https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap"
+headingFont = "'Plus Jakarta Sans':https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@600;700;800&display=swap"
+codeFont = "'JetBrains Mono':https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&display=swap"
+baseFontSize = 16
+headingFontSizes = ["2rem", "1.375rem", "1.0625rem"]
+headingFontWeights = [700, 700, 600]
+metricValueFontSize = "1.75rem"
+metricValueFontWeight = 700
+baseRadius = "10px"
+buttonRadius = "10px"
+showWidgetBorder = true
+
+[theme.light]
+primaryColor = "#1F6F78"
+backgroundColor = "#FBFAF7"
+secondaryBackgroundColor = "#F1EFE9"
+textColor = "#1E2A2E"
+linkColor = "#1A5E8C"
+borderColor = "#DCD8CE"
+dataframeBorderColor = "#E7E3DA"
+dataframeHeaderBackgroundColor = "#F1EFE9"
+greenColor = "#1A7A4C"
+greenTextColor = "#1A7A4C"
+redColor = "#B4432A"
+redTextColor = "#B42318"
+orangeColor = "#C27A12"
+orangeTextColor = "#8A5200"
+blueColor = "#1E5E9E"
+blueTextColor = "#1E5E9E"
+grayColor = "#8A99A3"
+grayTextColor = "#59666D"
+chartCategoricalColors = ["#1F6F78", "#D08A2E", "#5B6CB8", "#7A9E4F", "#A2557F", "#8A99A3"]
+
+[theme.dark]
+primaryColor = "#5DB8B3"
+backgroundColor = "#111719"
+secondaryBackgroundColor = "#1B2427"
+textColor = "#E5ECEA"
+linkColor = "#7FB8E6"
+borderColor = "#2C383C"
+dataframeBorderColor = "#253034"
+dataframeHeaderBackgroundColor = "#1B2427"
+greenColor = "#5DCB92"
+greenTextColor = "#5DCB92"
+redColor = "#F28C70"
+redTextColor = "#F48A80"
+orangeColor = "#EDB45C"
+orangeTextColor = "#EDB45C"
+blueColor = "#82B6EE"
+blueTextColor = "#82B6EE"
+grayColor = "#A7B4BB"
+grayTextColor = "#9AA9AE"
+chartCategoricalColors = ["#5DB8B3", "#E9A852", "#909EE8", "#A6C879", "#D78BB5", "#A7B4BB"]
 
 [server]
 # Uploads are broker CSV exports; they're small.

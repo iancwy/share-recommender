@@ -63,7 +63,7 @@ from share_recommender.portfolio_service import (
     valued_holdings,
 )
 from share_recommender.recommendations import build_recommendation
-from share_recommender.ui.theme import PALETTE, SEVERITY_BADGE
+from share_recommender.ui.theme import CSS, ICON, PALETTE, SEVERITY_BADGE
 from supabase import Client
 
 
@@ -84,8 +84,10 @@ def _money(amount, currency: str, cents: bool = False) -> str:
 DISCLAIMER = ("General information from a rules-based tool, not personal financial advice. "
               "Check any investment's fees and documents before you buy.")
 
-st.set_page_config(page_title="Shares", page_icon="📈", layout="wide",
+st.set_page_config(page_title="Shares", page_icon=ICON, layout="wide",
                    initial_sidebar_state="collapsed")
+st.html(CSS)
+st.logo(ICON, size="large")
 
 # On Streamlit Community Cloud the settings come from the app's secrets. Streamlit only copies
 # root-level secrets into environment variables, where Settings reads them, once st.secrets is
@@ -109,7 +111,9 @@ def _signed_in_user():
 
 
 def _login_screen() -> None:
-    st.title("📈 Share Recommender")
+    st.image(ICON, width=64)
+    st.title("Share Recommender")
+    st.caption("Your family's investing notebook: goals, holdings and sensible next steps.")
     sign_in, sign_up = st.tabs(["Sign in", "Create account"])
 
     with sign_in, st.form("sign_in"):
@@ -1465,7 +1469,7 @@ def main() -> None:
     repo = PortfolioRepository(_client())
     profile = repo.get_profile()
     with st.sidebar:
-        st.markdown("## 📈 Share Recommender")
+        st.markdown("## Share Recommender")
         st.caption(f"Signed in as {(profile and profile.display_name) or user.email}")
         if st.button("Sign out"):
             _client().auth.sign_out()
