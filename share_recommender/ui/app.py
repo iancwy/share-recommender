@@ -87,6 +87,12 @@ DISCLAIMER = ("General information from a rules-based tool, not personal financi
 st.set_page_config(page_title="Shares", page_icon="📈", layout="wide",
                    initial_sidebar_state="collapsed")
 
+# On Streamlit Community Cloud the settings come from the app's secrets. Streamlit only copies
+# root-level secrets into environment variables, where Settings reads them, once st.secrets is
+# loaded, so load it before anything reads the settings. Locally, with no secrets file, this
+# does nothing and .env is used as before.
+st.secrets.load_if_toml_exists()
+
 
 # Auth -------------------------------------------------------------------------
 
