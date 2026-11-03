@@ -27,6 +27,13 @@ class Fundamentals:
     pe_ratio: Decimal | None = None
     market_cap: Decimal | None = None      # in the exchange currency
     sector: str | None = None
+    name: str | None = None
+    quote_type: str | None = None          # "EQUITY" or "ETF"
+    fund_category: str | None = None       # funds only, e.g. "Intermediate Core Bond"
+
+    @property
+    def is_fund(self) -> bool:
+        return (self.quote_type or "").upper() in {"ETF", "MUTUALFUND"}
 
 
 class MarketDataProvider(ABC):

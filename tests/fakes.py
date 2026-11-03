@@ -16,6 +16,8 @@ from share_recommender.core.models import (
     Holding,
     HoldingIn,
     Profile,
+    WatchlistItem,
+    WatchlistItemIn,
 )
 from share_recommender.core.preferences import CategoryPreferences, InvestorPreferences
 from share_recommender.data.base import Fundamentals, MarketDataProvider, PriceBar, Quote
@@ -31,6 +33,7 @@ class FakeRepository:
         self.holdings: dict[UUID, Holding] = {}
         self.cash: dict[UUID, CashAccount] = {}
         self.dividends: dict[UUID, Dividend] = {}
+        self.watchlist: dict[UUID, WatchlistItem] = {}
         self.preferences: InvestorPreferences | None = None
         self.category_preferences: dict[UUID, CategoryPreferences] = {}
         self.notifications: list[dict] = []
@@ -56,6 +59,28 @@ class FakeRepository:
 
     def get_snapshots(self):
         return self.snapshots
+
+    def list_watchlist(self):
+        return sorted(self.watchlist.values(), key=lambda w: w.ticker)
+
+    def get_watchlist_item(self, item_id):
+        return self.watchlist.get(item_id)
+
+    def add_to_watchlist(self, w: WatchlistItemIn):
+        if any(x.key == w.key for x in self.watchlist.values()):
+            raise ValueError("Already on your watchlist")
+        item = WatchlistItem(id=uuid4(), user_id=USER_ID, **w.model_dump())
+        self.watchlist[item.id] = item
+        return item
+
+    def update_watchlist_item(self, item_id, w: WatchlistItemIn):
+        if item_id not in self.watchlist:
+            raise LookupError(item_id)
+        self.watchlist[item_id] = WatchlistItem(id=item_id, user_id=USER_ID, **w.model_dump())
+        return self.watchlist[item_id]
+
+    def remove_from_watchlist(self, item_id):
+        self.watchlist.pop(item_id, None)
 
     def list_dividends(self):
         return sorted(self.dividends.values(), key=lambda d: d.pay_date, reverse=True)
@@ -145,6 +170,9 @@ class FakeRepository:
         for cid, c in self.cash.items():
             if c.category_id == category_id:
                 self.cash[cid] = c.model_copy(update={"category_id": None})
+        for wid, w in self.watchlist.items():
+            if w.category_id == category_id:
+                self.watchlist[wid] = w.model_copy(update={"category_id": None})
 
     def list_holdings(self, category_id=None):
         rows = [h for h in self.holdings.values()
@@ -177,10 +205,12 @@ class FakeProvider(MarketDataProvider):
 
     def __init__(self, prices: dict[tuple[str, str], str] | None = None,
                  dividend_yields: dict[tuple[str, str], str] | None = None,
-                 price_everything: bool = False):
+                 price_everything: bool = False,
+                 fundamentals: dict[tuple[str, str], Fundamentals] | None = None):
         self.prices = prices or {("VAS", "ASX"): "100"}
         self.dividend_yields = dividend_yields or {}
         self.price_everything = price_everything
+        self.fundamentals = fundamentals or {}
 
     def get_quote(self, ticker, exchange):
         price = self.prices.get((ticker, exchange), "100" if self.price_everything else None)
@@ -196,6 +226,8 @@ class FakeProvider(MarketDataProvider):
         return Decimal(1) if base == quote else Decimal("0.5")
 
     def get_fundamentals(self, ticker, exchange):
+        if (ticker, exchange) in self.fundamentals:
+            return self.fundamentals[(ticker, exchange)]
         y = self.dividend_yields.get((ticker, exchange))
         return Fundamentals(dividend_yield=Decimal(y)) if y else None
 

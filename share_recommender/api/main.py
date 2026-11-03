@@ -29,6 +29,8 @@ from share_recommender.core.models import (
     HoldingIn,
     Profile,
     ProfileIn,
+    WatchlistItem,
+    WatchlistItemIn,
 )
 from share_recommender.core.preferences import CategoryPreferences, InvestorPreferences
 from share_recommender.core.recommender import Recommendation
@@ -36,6 +38,7 @@ from share_recommender.data import Quote
 from share_recommender.data.history import CachedHistory
 from share_recommender.portfolio_service import health_report, portfolio_history
 from share_recommender.recommendations import build_recommendation, provider_fns
+from share_recommender.watchlist_service import prepare_item
 
 app = FastAPI(title="Share Recommender API", version="0.1.0")
 
@@ -214,6 +217,49 @@ def create_dividend(body: DividendIn, repo: Repo) -> Dividend:
 @app.delete("/dividends/{dividend_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_dividend(dividend_id: UUID, repo: Repo) -> None:
     repo.delete_dividend(dividend_id)
+
+
+# Watchlist ------------------------------------------------------------------
+
+@app.get("/watchlist", response_model=list[WatchlistItem])
+def list_watchlist(repo: Repo) -> list[WatchlistItem]:
+    return repo.list_watchlist()
+
+
+@app.post("/watchlist", response_model=WatchlistItem, status_code=status.HTTP_201_CREATED)
+def add_to_watchlist(body: WatchlistItemIn, repo: Repo, market: MarketData) -> WatchlistItem:
+    quotes_fn, _, fundamentals_fn = provider_fns(market)
+    try:
+        item = prepare_item(body, quotes_fn, fundamentals_fn)
+    except ValueError as exc:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc)) from exc
+    try:
+        return repo.add_to_watchlist(item)
+    except ValueError as exc:
+        raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
+
+
+@app.put("/watchlist/{item_id}", response_model=WatchlistItem)
+def update_watchlist_item(item_id: UUID, body: WatchlistItemIn, repo: Repo) -> WatchlistItem:
+    return repo.update_watchlist_item(item_id, body)
+
+
+@app.delete("/watchlist/{item_id}", status_code=status.HTTP_204_NO_CONTENT)
+def remove_from_watchlist(item_id: UUID, repo: Repo) -> None:
+    repo.remove_from_watchlist(item_id)
+
+
+@app.post("/watchlist/{item_id}/convert", response_model=Holding,
+          status_code=status.HTTP_201_CREATED)
+def convert_watchlist_item(item_id: UUID, body: HoldingIn, repo: Repo,
+                           remove: bool = True) -> Holding:
+    """Record a purchase of a watchlist item, and (by default) take it off the watchlist."""
+    if repo.get_watchlist_item(item_id) is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Watchlist item not found")
+    holding = repo.create_holding(body)
+    if remove:
+        repo.remove_from_watchlist(item_id)
+    return holding
 
 
 # Cash accounts --------------------------------------------------------------

@@ -504,3 +504,74 @@ def test_cloud_entry_point_runs_the_app(repo):
     finally:
         for p in patches:
             p.stop()
+
+
+def test_watchlist_add_edit_remove_and_convert(run_app, repo):
+    from share_recommender.core.models import WatchlistItemIn
+
+    at = run_app()
+    _go(at, "Watchlist").run()
+    assert not at.exception
+    assert any("Nothing on your watchlist yet" in i.value for i in at.info)
+
+    at.text_input(key="add_watch_ticker").input("VAS")  # the fake provider prices VAS
+    at.number_input(key="add_watch_below").set_value(90.0)
+    _button(at, "Add to watchlist").click().run()
+    assert not at.exception
+    (vas,) = repo.watchlist.values()
+    assert (vas.ticker, vas.name, vas.added_price, vas.alert_below) == \
+        ("VAS", "Vanguard Australian Shares Index ETF", Decimal(100), Decimal(90))
+
+    at.text_input(key="add_watch_ticker").input("VAS")
+    _button(at, "Add to watchlist").click().run()
+    assert any("Already on your watchlist" in e.value for e in at.error)
+    at.text_input(key="add_watch_ticker").input("NOPE")
+    _button(at, "Add to watchlist").click().run()
+    assert any("Couldn't find NOPE on ASX" in e.value for e in at.error)
+
+    # Edit the alert.
+    at = run_app()
+    _go(at, "Watchlist").run()
+    at.selectbox(key="watch_pick").set_value(vas).run()
+    at.number_input(key=f"edit_watch_{vas.id}_above").set_value(120.0)
+    _button(at, "Save changes").click().run()
+    assert repo.watchlist[vas.id].alert_above == 120
+
+    # Convert to a holding: prefilled, units to fill in, and removed from the watchlist.
+    at = run_app()
+    _go(at, "Watchlist").run()
+    at.selectbox(key="watch_pick").set_value(repo.watchlist[vas.id]).run()
+    at.radio(key=f"watch_action_{vas.id}").set_value("Convert to holding").run()
+    assert at.number_input(key=f"convert_{vas.id}_price").value == 100.0
+    at.number_input(key=f"convert_{vas.id}_units").set_value(10.0)
+    _button(at, "Add holding").click().run()
+    assert not at.exception
+    (holding,) = repo.holdings.values()
+    assert (holding.ticker, holding.units, holding.buy_price, holding.platform) == \
+        ("VAS", 10, 100, "CMC Markets")
+    assert not repo.watchlist
+    assert at.title[0].value == "Holdings"
+
+    # Removing.
+    item = repo.add_to_watchlist(WatchlistItemIn(ticker="VAS", exchange="ASX"))
+    at = run_app()
+    _go(at, "Watchlist").run()
+    at.selectbox(key="watch_pick").set_value(item).run()
+    at.radio(key=f"watch_action_{item.id}").set_value("Remove").run()
+    at.checkbox(key=f"confirm_watch_{item.id}").check().run()
+    _button(at, "Remove from watchlist").click().run()
+    assert not repo.watchlist
+
+
+def test_convert_can_keep_the_watchlist_item(run_app, repo):
+    from share_recommender.core.models import WatchlistItemIn
+
+    item = repo.add_to_watchlist(WatchlistItemIn(ticker="VAS", exchange="ASX", added_price=95))
+    at = run_app()
+    _go(at, "Watchlist").run()
+    at.selectbox(key="watch_pick").set_value(item).run()
+    at.radio(key=f"watch_action_{item.id}").set_value("Convert to holding").run()
+    at.checkbox(key=f"convert_remove_{item.id}").uncheck()
+    at.number_input(key=f"convert_{item.id}_units").set_value(5.0)
+    _button(at, "Add holding").click().run()
+    assert len(repo.holdings) == 1 and item.id in repo.watchlist

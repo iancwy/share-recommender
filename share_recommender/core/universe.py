@@ -313,6 +313,18 @@ def classify(ticker: str, exchange: str) -> dict[AssetClass, Decimal]:
             Decimal(1)}
 
 
+# A fund whose name or category mentions any of these holds bonds or other fixed income.
+BOND_WORDS = ("bond", "fixed income", "fixed interest", "treasury", "credit", "aggregate")
+
+
+def is_bond_fund(name: str | None, fund_category: str | None = None) -> bool:
+    """True for a bond or fixed-income fund. Only call it for funds: some companies have these
+    words in their names (Credit Corp, for example). The app tracks shares, ETFs and cash only.
+    """
+    text = f"{name or ''} {fund_category or ''}".lower()
+    return any(word in text for word in BOND_WORDS)
+
+
 def us_exchange(ticker: str) -> str:
     """NASDAQ or NYSE for a US ticker, from the list; NYSE if it isn't on the list."""
     return "NASDAQ" if lookup(ticker, "NASDAQ") else "NYSE"

@@ -109,6 +109,9 @@ class YahooFinanceProvider(MarketDataProvider):
             pe_ratio=_decimal(info.get("trailingPE"), 2),
             market_cap=_decimal(info.get("marketCap"), 0),
             sector=info.get("sector"),
+            name=info.get("longName") or info.get("shortName"),
+            quote_type=info.get("quoteType"),
+            fund_category=info.get("category"),
         )
 
     def get_many_fundamentals(self, symbols: list[tuple[str, str]]

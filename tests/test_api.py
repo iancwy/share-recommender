@@ -150,3 +150,20 @@ def test_notifications_endpoints(client):
     me = client.put("/me", json={"notify_frequency": "daily", "notify_email": False}).json()
     assert (me["notify_frequency"], me["notify_email"]) == ("daily", False)
     assert client.put("/me", json={"notify_frequency": "hourly"}).status_code == 422
+
+
+def test_watchlist_endpoints(client):
+    added = client.post("/watchlist", json={"ticker": "vas", "exchange": "ASX"})
+    assert added.status_code == 201 and added.json()["added_price"] == "100"
+    assert client.post("/watchlist", json={"ticker": "VAS", "exchange": "ASX"}).status_code == 409
+    assert client.post("/watchlist", json={"ticker": "NOPE", "exchange": "ASX"}).status_code == 422
+    item_id = added.json()["id"]
+    updated = client.put(f"/watchlist/{item_id}", json={"ticker": "VAS", "exchange": "ASX",
+                                                        "alert_below": "90"})
+    assert updated.json()["alert_below"] == "90"
+    holding = {"ticker": "VAS", "exchange": "ASX", "units": "10", "buy_price": "100",
+               "buy_date": "2026-11-02"}
+    converted = client.post(f"/watchlist/{item_id}/convert", json=holding)
+    assert converted.status_code == 201 and converted.json()["units"] == "10"
+    assert client.get("/watchlist").json() == []
+    assert client.post(f"/watchlist/{item_id}/convert", json=holding).status_code == 404

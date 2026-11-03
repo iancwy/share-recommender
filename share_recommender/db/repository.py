@@ -8,6 +8,8 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
+from postgrest.exceptions import APIError
+
 from share_recommender.core.models import (
     CashAccount,
     CashAccountIn,
@@ -19,6 +21,8 @@ from share_recommender.core.models import (
     HoldingIn,
     Profile,
     ProfileIn,
+    WatchlistItem,
+    WatchlistItemIn,
 )
 from share_recommender.core.preferences import CategoryPreferences, InvestorPreferences
 from supabase import Client
@@ -28,7 +32,8 @@ def _now() -> str:
     return datetime.now().astimezone().isoformat()
 
 
-def _payload(model: CategoryIn | HoldingIn | CashAccountIn | DividendIn) -> dict[str, Any]:
+def _payload(model: CategoryIn | HoldingIn | CashAccountIn | DividendIn | WatchlistItemIn
+             ) -> dict[str, Any]:
     return model.model_dump(mode="json")
 
 
@@ -235,3 +240,32 @@ class PortfolioRepository:
 
     def delete_dividend(self, dividend_id: UUID) -> None:
         self._db.table("dividends").delete().eq("id", str(dividend_id)).execute()
+
+    # Watchlist -----------------------------------------------------------
+
+    def list_watchlist(self) -> list[WatchlistItem]:
+        rows = self._db.table("watchlist").select("*").order("ticker").execute().data
+        return [WatchlistItem.model_validate(r) for r in rows]
+
+    def get_watchlist_item(self, item_id: UUID) -> WatchlistItem | None:
+        rows = self._db.table("watchlist").select("*").eq("id", str(item_id)).execute().data
+        return WatchlistItem.model_validate(rows[0]) if rows else None
+
+    def add_to_watchlist(self, item: WatchlistItemIn) -> WatchlistItem:
+        try:
+            rows = self._db.table("watchlist").insert(_payload(item)).execute().data
+        except APIError as exc:
+            if exc.code == "23505":  # unique violation: already there
+                raise ValueError("Already on your watchlist") from exc
+            raise
+        return WatchlistItem.model_validate(rows[0])
+
+    def update_watchlist_item(self, item_id: UUID, item: WatchlistItemIn) -> WatchlistItem:
+        rows = (self._db.table("watchlist").update(_payload(item)).eq("id", str(item_id))
+                .execute().data)
+        if not rows:
+            raise LookupError(f"Watchlist item {item_id} not found")
+        return WatchlistItem.model_validate(rows[0])
+
+    def remove_from_watchlist(self, item_id: UUID) -> None:
+        self._db.table("watchlist").delete().eq("id", str(item_id)).execute()
