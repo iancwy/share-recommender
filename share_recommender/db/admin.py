@@ -9,8 +9,9 @@ from datetime import datetime
 from uuid import UUID
 
 from share_recommender.config import JobSettings
-from share_recommender.core.models import CashAccount, Category, Holding, Profile
+from share_recommender.core.models import CashAccount, Category, Holding, Profile, WatchlistItem
 from share_recommender.core.notifications import Message
+from share_recommender.core.picker import PickRow, PickRun, pick_from_record, pick_record
 from share_recommender.core.preferences import CategoryPreferences, InvestorPreferences
 from supabase import Client, ClientOptions, create_client
 
@@ -100,3 +101,35 @@ class AdminRepository:
             (self._db.table("notifications")
              .update({"emailed_at": datetime.now().astimezone().isoformat()})
              .eq("user_id", self._uid).in_("id", notification_ids).execute())
+
+    def watchlist(self) -> list[WatchlistItem]:
+        rows = self._db.table("watchlist").select("*").eq("user_id", self._uid).execute().data
+        return [WatchlistItem.model_validate(r) for r in rows]
+
+    # AI picker runs -------------------------------------------------------
+
+    def latest_pick_run(self) -> PickRun | None:
+        rows = (self._db.table("pick_runs").select("*").eq("user_id", self._uid)
+                .eq("status", "ok").order("created_at", desc=True).limit(1).execute().data)
+        return PickRun.model_validate(rows[0]) if rows else None
+
+    def picks(self, run_id: UUID | str) -> list[PickRow]:
+        rows = (self._db.table("ai_picks").select("*").eq("user_id", self._uid)
+                .eq("run_id", str(run_id)).order("rank").execute().data)
+        return [pick_from_record(r) for r in rows]
+
+    def save_pick_run(self, run: PickRun, picks: list[PickRow]) -> str:
+        run_id = (self._db.table("pick_runs").insert(run.record() | {"user_id": self._uid})
+                  .execute().data[0]["id"])
+        if picks:
+            self._db.table("ai_picks").insert(
+                [pick_record(p, run_id) | {"user_id": self._uid} for p in picks]).execute()
+        return run_id
+
+    def prune_pick_runs(self, keep: int = 10) -> None:
+        rows = (self._db.table("pick_runs").select("id").eq("user_id", self._uid)
+                .order("created_at", desc=True).execute().data)
+        old = [r["id"] for r in rows[keep:]]
+        if old:
+            (self._db.table("pick_runs").delete().eq("user_id", self._uid).in_("id", old)
+             .execute())

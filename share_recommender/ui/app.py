@@ -1789,6 +1789,15 @@ def _notifications_page(repo: PortfolioRepository) -> None:
         _preview_changes(repo)
 
 
+def _latest_picks(repo: PortfolioRepository):
+    """The latest AI picker run's picks, or None (no run yet, or no picker tables)."""
+    try:
+        run = repo.latest_pick_run()
+        return repo.list_picks(run.id) if run else None
+    except APIError:
+        return None
+
+
 def _preview_changes(repo: PortfolioRepository) -> None:
     categories = repo.list_categories()
     profile = repo.get_profile()
@@ -1800,7 +1809,8 @@ def _preview_changes(repo: PortfolioRepository) -> None:
             inv=repo.get_preferences(), base=profile.base_currency if profile else "AUD",
             old_snapshots=repo.get_snapshots(), quotes_fn=_quotes, fx_fn=_fx_rates,
             fundamentals_fn=_fundamentals, history_fn=_history, today=date.today(),
-            weekly=bool(profile and profile.notify_frequency == "weekly"))
+            weekly=bool(profile and profile.notify_frequency == "weekly"),
+            watchlist=repo.list_watchlist(), picks=_latest_picks(repo))
     if outcome.baseline:
         st.info("There's no earlier check to compare with yet. The first scheduled check will "
                 "record where things stand.")
@@ -1812,7 +1822,6 @@ def _preview_changes(repo: PortfolioRepository) -> None:
             st.markdown(f"- **{m.goal or 'Portfolio'}: {m.title}**: {m.body}")
 
 
-# Profile ----------------------------------------------------------------------
 # Profile ----------------------------------------------------------------------
 
 def _profile_page(repo: PortfolioRepository, email: str) -> None:

@@ -10,9 +10,14 @@ Comparing it with the last snapshot gives what's new:
 Findings that clear are mentioned as good news, but never trigger a notification on their
 own. The first run for a person only stores a baseline.
 
-Two extras sit alongside: **big price moves** in a holding, and **goal deadline reminders**
-(24, 12, 6, 3 and 1 month(s) before a target date). What they've already said is kept in the
-portfolio snapshot's ``sent`` list, so each is sent once.
+The latest **AI picker** run is in the goal snapshots too: a new buy idea, or a held share
+moving from hold to review, is news. An older snapshot without AI picks is a baseline for
+them, so turning the picker on doesn't send a message about every existing pick.
+
+Extras sit alongside: **big price moves** in a holding or watchlist item, **watchlist price
+alerts**, and **goal deadline reminders** (24, 12, 6, 3 and 1 month(s) before a target date).
+What they've already said is kept in the portfolio snapshot's ``sent`` list, so each is sent
+once.
 """
 
 import html
@@ -23,9 +28,11 @@ from decimal import Decimal
 from uuid import UUID
 
 from share_recommender.core.health import Finding, Severity
-from share_recommender.core.models import Category, Holding
+from share_recommender.core.models import Category, Holding, WatchlistItem
 from share_recommender.core.performance import GoalProgress
+from share_recommender.core.picker import AI_DISCLAIMER, PickRow
 from share_recommender.core.recommender import Recommendation
+from share_recommender.core.watchlist import CURRENCY_SYMBOLS
 from share_recommender.data.base import PriceBar
 
 PORTFOLIO = "portfolio"  # the snapshot scope for findings that aren't about one goal
@@ -35,6 +42,7 @@ DEADLINE_MONTHS = [24, 12, 6, 3, 1]
 PRICE_MOVE_PCT = {1: Decimal(5), 7: Decimal(10)}  # over a day for daily, a week for weekly
 STALE_PRICE_DAYS = 4
 MAX_SENT_KEYS = 300
+AI_CONVICTIONS = {"high", "medium"}  # low-conviction picks never notify
 DISCLAIMER = ("General information from a rules-based tool, not personal financial advice.")
 
 
@@ -45,16 +53,27 @@ def finding_key(f: Finding) -> str:
     return f"{f.area}|{re.sub(r'[0-9.,%]+', '#', f.title)}"
 
 
+def _first_sentence(text: str) -> str:
+    return text.split(". ")[0].rstrip(".") + "."
+
+
 def snapshot(rec: Recommendation | None, findings: list[Finding],
-             sent: list[str] = ()) -> dict:
-    """What a goal (or the portfolio) looks like now. Stored as JSON."""
-    return {
+             sent: list[str] = (), picks: list[PickRow] | None = None) -> dict:
+    """What a goal (or the portfolio) looks like now. Stored as JSON. ``picks`` are the
+    latest AI picker run's picks for this goal (None when there's no run yet)."""
+    snap = {
         "picks": ({f"{p.ticker}:{p.exchange}": str(p.weight) for p in rec.mix.picks}
                   if rec else {}),
         "findings": {finding_key(f): {"severity": f.severity.value, "title": f.title}
                      for f in findings if f.severity in NOTIFY_LEVELS},
         "sent": list(sent)[-MAX_SENT_KEYS:],
     }
+    if picks is not None:
+        sure = [p for p in picks if p.conviction in AI_CONVICTIONS]
+        snap["ai"] = {f"{p.ticker}:{p.exchange}": p.action for p in sure}
+        snap["ai_detail"] = {f"{p.ticker}:{p.exchange}": {
+            "conviction": p.conviction, "reason": _first_sentence(p.rationale)} for p in sure}
+    return snap
 
 
 @dataclass
@@ -64,11 +83,18 @@ class Change:
     reweighted: list[str] = field(default_factory=list)     # "VGS (ASX) 40% -> 31%"
     new_findings: list[dict] = field(default_factory=list)  # {"severity", "title"}
     cleared: list[str] = field(default_factory=list)        # titles, good news only
+    ai_new: list[dict] = field(default_factory=list)        # {"label", "conviction", "reason"}
+    ai_review: list[dict] = field(default_factory=list)
 
     @property
     def due(self) -> bool:
-        """Clearing alone never triggers a notification."""
-        return bool(self.added or self.removed or self.reweighted or self.new_findings)
+        """Clearing alone, or an AI pick dropping out, never triggers a notification."""
+        return bool(self.added or self.removed or self.reweighted or self.new_findings
+                    or self.ai_changed)
+
+    @property
+    def ai_changed(self) -> bool:
+        return bool(self.ai_new or self.ai_review)
 
     @property
     def picks_changed(self) -> bool:
@@ -96,20 +122,32 @@ def diff(old: dict | None, new: dict) -> Change | None:
     old_f, new_f = old.get("findings", {}), new.get("findings", {})
     change.new_findings = [f for k, f in new_f.items() if k not in old_f]
     change.cleared = [f["title"] for k, f in old_f.items() if k not in new_f]
+    if "ai" in old:  # otherwise this is the AI picks' baseline
+        old_ai, detail = old["ai"], new.get("ai_detail", {})
+        for key, action in new.get("ai", {}).items():
+            info = {"label": _label(key)} | detail.get(key, {"conviction": "", "reason": ""})
+            if action == "buy" and old_ai.get(key) != "buy":
+                change.ai_new.append(info)
+            elif action == "review" and old_ai.get(key) == "hold":
+                change.ai_review.append(info)
     return change
 
 
 # Extras: price moves and deadline reminders --------------------------------------
 
-def price_moves(holdings: list[Holding], prices: dict[tuple[str, str], list[PriceBar]],
-                days: int, already_sent: set[str], today: date) -> list[tuple[str, str]]:
-    """(key, line) for each holding that moved more than the threshold over ``days``."""
+def price_moves(holdings: list[Holding | WatchlistItem],
+                prices: dict[tuple[str, str], list[PriceBar]], days: int,
+                already_sent: set[str], today: date) -> list[tuple[str, str]]:
+    """(key, line) for each holding or watchlist item that moved more than the threshold over
+    ``days``. Watchlist items have no units, so their line leaves out the dollar change."""
     threshold = PRICE_MOVE_PCT[days]
-    held: dict[tuple[str, str], Decimal] = {}
+    held: dict[tuple[str, str], Decimal | None] = {}
     currency: dict[tuple[str, str], str] = {}
     for h in holdings:
-        held[(h.ticker, h.exchange)] = held.get((h.ticker, h.exchange), Decimal(0)) + h.units
-        currency[(h.ticker, h.exchange)] = h.currency
+        key = (h.ticker, h.exchange)
+        units = getattr(h, "units", None)
+        held[key] = None if units is None else (held.get(key) or Decimal(0)) + units
+        currency[key] = h.currency
     out = []
     for key, units in sorted(held.items()):
         bars = sorted(prices.get(key, []), key=lambda b: b.day)
@@ -123,11 +161,42 @@ def price_moves(holdings: list[Holding], prices: dict[tuple[str, str], list[Pric
         if abs(pct) < threshold or item_key in already_sent:
             continue
         period = "on" if days == 1 else "in the week to"
-        change = units * (last.close - prev.close)
-        out.append((item_key,
-                    f"{key[0]} {'up' if pct > 0 else 'down'} {abs(pct):.1f}% {period} "
-                    f"{last.day:%a %d %b}, to {last.close:,.2f} {currency[key]} "
-                    f"({change:+,.0f} {currency[key]} on your {units:g} units)"))
+        line = (f"{key[0]} {'up' if pct > 0 else 'down'} {abs(pct):.1f}% {period} "
+                f"{last.day:%a %d %b}")
+        if units is not None:
+            change = units * (last.close - prev.close)
+            line += (f", to {last.close:,.2f} {currency[key]} "
+                     f"({change:+,.0f} {currency[key]} on your {units:g} units)")
+        out.append((item_key, line))
+    return out
+
+
+def _price(amount: Decimal, currency: str) -> str:
+    symbol = CURRENCY_SYMBOLS.get(currency)
+    return f"{symbol}{amount:,.2f}" if symbol else f"{amount:,.2f} {currency}"
+
+
+def watchlist_alerts(items: list[WatchlistItem], latest_closes: dict[tuple[str, str], PriceBar],
+                     already_sent: set[str], today: date) -> list[tuple[str, str]]:
+    """(key, line) for each watchlist item at or past one of its price alerts, once per level
+    (changing the level re-arms it). Nothing for a price older than STALE_PRICE_DAYS."""
+    out = []
+    for item in sorted(items, key=lambda i: i.key):
+        bar = latest_closes.get(item.key)
+        if bar is None or (today - bar.day).days > STALE_PRICE_DAYS:
+            continue
+        price = _price(bar.close, item.currency)
+        for side, level, hit, verb in (
+                ("below", item.alert_below, item.alert_below is not None
+                 and bar.close <= item.alert_below, "fell to"),
+                ("above", item.alert_above, item.alert_above is not None
+                 and bar.close >= item.alert_above, "rose to")):
+            if not hit:
+                continue
+            key = f"watch:{item.ticker}:{item.exchange}:{side}:{level.normalize():f}"
+            if key not in already_sent:
+                out.append((key, f"{item.ticker} {verb} {price}, at or {side} your "
+                                 f"{_price(level, item.currency).removesuffix('.00')} alert"))
     return out
 
 
@@ -173,7 +242,7 @@ def deadline_reminders(categories: list[Category], progress: dict[UUID, GoalProg
 class Message:
     """One in-app notification; the email combines them all."""
 
-    kind: str                     # 'recommendation', 'health', 'price_move' or 'deadline'
+    kind: str  # 'recommendation', 'health', 'price_move', 'deadline', 'ai_pick' or 'watchlist'
     title: str
     body: str
     category_id: UUID | None = None
@@ -192,16 +261,28 @@ def goal_message(category: Category, change: Change) -> Message:
     for f in change.new_findings:
         label = "Alert" if f["severity"] == Severity.ALERT.value else "Warning"
         lines.append(f"{label}: {f['title']}.")
+    for p in change.ai_new:
+        lines.append(f"New AI pick: {p['label']}" + (f", {p['conviction']} conviction"
+                                                     if p["conviction"] else "") + ".")
+    for p in change.ai_review:
+        lines.append(f"The AI picker suggests reviewing {p['label']}.")
     if change.cleared:
         lines.append("Good news, now resolved: " + "; ".join(change.cleared) + ".")
-    title = ("Recommendations changed" if change.picks_changed else
-             f"{len(change.new_findings)} new health check "
-             f"{'issue' if len(change.new_findings) == 1 else 'issues'}")
-    return Message("recommendation" if change.picks_changed else "health", title,
-                   " ".join(lines), category.id, category.name,
+    only_ai = change.ai_changed and not (change.picks_changed or change.new_findings)
+    if only_ai:
+        kind = "ai_pick"
+        title = (f"{len(change.ai_new)} new AI pick{'s' if len(change.ai_new) > 1 else ''}"
+                 if change.ai_new else "The AI picker suggests a review")
+    elif change.picks_changed or change.ai_changed:
+        kind, title = "recommendation", "Recommendations changed"
+    else:
+        n = len(change.new_findings)
+        kind, title = "health", f"{n} new health check {'issue' if n == 1 else 'issues'}"
+    return Message(kind, title, " ".join(lines), category.id, category.name,
                    {"added": change.added, "removed": change.removed,
                     "reweighted": change.reweighted, "new_findings": change.new_findings,
-                    "cleared": change.cleared})
+                    "cleared": change.cleared, "ai_new": change.ai_new,
+                    "ai_review": change.ai_review})
 
 
 def portfolio_message(change: Change) -> Message:
@@ -223,6 +304,28 @@ def price_message(moves: list[tuple[str, str]]) -> Message:
                    payload={"keys": [k for k, _ in moves]})
 
 
+def watchlist_message(alerts: list[tuple[str, str]], moves: list[tuple[str, str]]
+                      ) -> Message:
+    """One message for all of a run's watchlist alerts and big moves."""
+    lines = alerts + moves
+    return Message("watchlist", "Watchlist", " ".join(line + "." for _, line in lines),
+                   payload={"keys": [k for k, _ in lines]})
+
+
+def _ai_lines(messages: list[Message]) -> list[str]:
+    """New buy ideas and reviews across the messages, with their one-line reasons."""
+    lines = []
+    for m in messages:
+        for p in m.payload.get("ai_new", []):
+            lines.append(f"{m.goal}: buy idea {p['label']}"
+                         + (f" ({p['conviction']} conviction)" if p["conviction"] else "")
+                         + (f". {p['reason']}" if p["reason"] else ""))
+        for p in m.payload.get("ai_review", []):
+            lines.append(f"{m.goal}: review {p['label']}"
+                         + (f". {p['reason']}" if p["reason"] else ""))
+    return lines
+
+
 def compose_email(messages: list[Message], name: str | None, app_url: str
                   ) -> tuple[str, str, str]:
     """Subject, plain text and HTML for one email combining all of a person's messages."""
@@ -234,13 +337,18 @@ def compose_email(messages: list[Message], name: str | None, app_url: str
         subject = f"{len(messages)} updates" + (f" for {', '.join(goals)}" if goals else "")
     subject = f"Share Recommender: {subject}"
     hello = f"Hi {name}," if name else "Hi,"
+    ai_lines = _ai_lines(messages)
     footer = (f"{DISCLAIMER} To change how often you get these, or stop them, open the "
               "Profile page in the app.")
+    if ai_lines:
+        footer = f"{AI_DISCLAIMER} {footer}"
 
     text = [hello, "", "Here's what's new in your portfolio:", ""]
     for m in messages:
         heading = f"{m.goal}: {m.title}" if m.goal else m.title
         text += [heading.upper(), m.body, ""]
+    if ai_lines:
+        text += ["AI PICKS"] + [f"- {line}" for line in ai_lines] + [""]
     text += [f"Open the app: {app_url}", "", footer]
 
     e = html.escape
@@ -249,6 +357,9 @@ def compose_email(messages: list[Message], name: str | None, app_url: str
         heading = f"{m.goal}: {m.title}" if m.goal else m.title
         parts.append(f"<h3 style='margin:20px 0 6px'>{e(heading)}</h3><p style='margin:0'>"
                      f"{e(m.body)}</p>")
+    if ai_lines:
+        parts.append("<h3 style='margin:20px 0 6px'>AI picks</h3><ul style='margin:0'>"
+                     + "".join(f"<li>{e(line)}</li>" for line in ai_lines) + "</ul>")
     parts.append(f"<p style='margin-top:20px'><a href='{e(app_url)}'>Open Share Recommender</a>"
                  f"</p><p style='color:#898781;font-size:12px'>{e(footer)}</p>")
     body_html = ("<div style='font-family:system-ui,-apple-system,Segoe UI,sans-serif;"
