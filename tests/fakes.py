@@ -20,7 +20,13 @@ from share_recommender.core.models import (
     WatchlistItemIn,
 )
 from share_recommender.core.preferences import CategoryPreferences, InvestorPreferences
-from share_recommender.data.base import Fundamentals, MarketDataProvider, PriceBar, Quote
+from share_recommender.data.base import (
+    Candidate,
+    Fundamentals,
+    MarketDataProvider,
+    PriceBar,
+    Quote,
+)
 
 USER_ID = UUID("11111111-1111-1111-1111-111111111111")
 
@@ -206,11 +212,14 @@ class FakeProvider(MarketDataProvider):
     def __init__(self, prices: dict[tuple[str, str], str] | None = None,
                  dividend_yields: dict[tuple[str, str], str] | None = None,
                  price_everything: bool = False,
-                 fundamentals: dict[tuple[str, str], Fundamentals] | None = None):
+                 fundamentals: dict[tuple[str, str], Fundamentals] | None = None,
+                 discovered: dict[str, list[Candidate]] | None = None):
         self.prices = prices or {("VAS", "ASX"): "100"}
         self.dividend_yields = dividend_yields or {}
         self.price_everything = price_everything
         self.fundamentals = fundamentals or {}
+        self.discovered = discovered or {}
+        self.fundamentals_requests: list[tuple[str, str]] = []
 
     def get_quote(self, ticker, exchange):
         price = self.prices.get((ticker, exchange), "100" if self.price_everything else None)
@@ -225,7 +234,11 @@ class FakeProvider(MarketDataProvider):
     def get_fx_rate(self, base, quote):
         return Decimal(1) if base == quote else Decimal("0.5")
 
+    def discover(self, exchange, limit=150):
+        return self.discovered.get(exchange, [])[:limit]
+
     def get_fundamentals(self, ticker, exchange):
+        self.fundamentals_requests.append((ticker, exchange))
         if (ticker, exchange) in self.fundamentals:
             return self.fundamentals[(ticker, exchange)]
         y = self.dividend_yields.get((ticker, exchange))
@@ -268,3 +281,23 @@ class FakePriceStore:
         self.bars.setdefault((exchange, ticker), {}).update({b.day: b for b in bars})
         self.sync[(exchange, ticker)] = (first_day, last_day, datetime.now(UTC))
         self.saves.append((exchange, ticker, first_day, last_day))
+
+
+class FakeFundamentalsStore:
+    """In-memory fundamentals cache; set ``broken`` to make every call fail."""
+
+    def __init__(self, items=None, broken=False):
+        self.items: dict = dict(items or {})  # key -> (Fundamentals, fetched_at)
+        self.broken = broken
+        self.saved: list = []
+
+    def get_many(self, keys):
+        if self.broken:
+            raise RuntimeError("relation fundamentals_cache does not exist")
+        return {k: self.items[k] for k in keys if k in self.items}
+
+    def save_many(self, items):
+        if self.broken:
+            raise RuntimeError("relation fundamentals_cache does not exist")
+        self.saved.append(dict(items))
+        self.items.update({k: (f, datetime.now(UTC)) for k, f in items.items()})

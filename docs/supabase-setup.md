@@ -28,6 +28,8 @@
    Week 5 adds, in this order:
    - `20261108000100_watchlist.sql`: shares and ETFs each person tracks without owning
      (owner-only, like holdings).
+   - `20261108000200_fundamentals_cache.sql`: a shared cache of company and fund figures
+     (market data only, like the price cache).
 
    (If you prefer the Supabase CLI: `supabase link --project-ref <ref>` then `supabase db push`.)
 
