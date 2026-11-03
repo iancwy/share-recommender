@@ -35,20 +35,26 @@ Conviction = Literal["high", "medium", "low"]
 
 # Claude's answer ----------------------------------------------------------------------
 
+# No length or range limits in the schema: the SDK checks those after the answer arrives, so
+# one long rationale would throw away the whole run. ``check`` trims and clamps instead.
+RATIONALE_LIMIT, RISKS_LIMIT, SUMMARY_LIMIT = 1200, 400, 600
+MAX_RANK = 50                          # the ai_picks.rank check in the database
+
+
 class AIPick(BaseModel):
     ticker: str
     exchange: str
     action: Action
     conviction: Conviction
-    rank: int = Field(ge=1, le=50)
-    suggested_weight: Decimal | None = Field(default=None, ge=0, le=100)  # % of the goal
-    rationale: str = Field(max_length=1200)
-    risks: str = Field(max_length=400)
+    rank: int
+    suggested_weight: Decimal | None = None  # % of the goal
+    rationale: str
+    risks: str
 
 
 class GoalPicks(BaseModel):
     goal: str                       # "g1", "g2", …
-    summary: str = Field(max_length=600)
+    summary: str
     picks: list[AIPick]
 
 
@@ -149,10 +155,19 @@ class PickRow:
     source: str
 
 
+def _trim(text: str, limit: int) -> str:
+    text = text.strip()
+    return text if len(text) <= limit else text[:limit - 1].rstrip() + "…"
+
+
 def _row(goal: PickerGoal, item: ShortlistItem, pick: AIPick) -> PickRow:
+    weight = pick.suggested_weight
+    if weight is not None and not 0 < weight <= 100:
+        weight = None
     return PickRow(str(goal.category.id), item.key[0], item.key[1], item.name, item.kind,
-                   pick.action, pick.conviction, pick.rank, item.score, pick.suggested_weight,
-                   pick.rationale, pick.risks or None, item.metrics, item.source)
+                   pick.action, pick.conviction, pick.rank, item.score, weight,
+                   _trim(pick.rationale, RATIONALE_LIMIT),
+                   _trim(pick.risks, RISKS_LIMIT) or None, item.metrics, item.source)
 
 
 def _fix_action(pick: AIPick, item: ShortlistItem, held: bool, watched: bool
@@ -231,7 +246,8 @@ def check(output: PickerOutput, goals: list[PickerGoal]) -> tuple[list[PickRow],
             if key not in seen:
                 action = "hold" if key in held else "watch"
                 kept.append(_row(goal, items[key], AIPick(
-                    ticker=key[0], exchange=key[1], action=action, conviction="low", rank=50,
+                    ticker=key[0], exchange=key[1], action=action, conviction="low",
+                    rank=MAX_RANK,
                     rationale=NOT_RANKED, risks="")))
 
         room = share_room(goal.recommendation)
@@ -248,7 +264,7 @@ def check(output: PickerOutput, goals: list[PickerGoal]) -> tuple[list[PickRow],
                             f"{total:g}%, more than the {room:g}% set aside for individual "
                             "shares, so they were scaled down")
         for n, r in enumerate(kept, start=1):
-            r.rank = n
+            r.rank = min(n, MAX_RANK)
         rows.extend(kept)
     return rows, warnings
 
@@ -256,7 +272,8 @@ def check(output: PickerOutput, goals: list[PickerGoal]) -> tuple[list[PickRow],
 def summaries(output: PickerOutput, goals: list[PickerGoal]) -> dict[str, str]:
     """Claude's summary per goal, keyed by category id."""
     ids = {g.key: str(g.category.id) for g in goals}
-    return {ids[gp.goal]: gp.summary for gp in output.goals if gp.goal in ids}
+    return {ids[gp.goal]: _trim(gp.summary, SUMMARY_LIMIT) for gp in output.goals
+            if gp.goal in ids}
 
 
 # Saved runs ------------------------------------------------------------------------------

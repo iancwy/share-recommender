@@ -232,3 +232,33 @@ def test_a_refusal_is_a_friendly_error(monkeypatch):
                                               usage=None))
     with pytest.raises(AIUnavailable, match="couldn't rank"):
         ai_picker.rank({})
+
+
+def test_a_long_answer_is_trimmed_not_rejected():
+    goal = _goal("g1", [_item("AAA")])
+    long = AIPick(ticker="AAA", exchange="ASX", action="buy", conviction="high", rank=99,
+                  suggested_weight=D(150), rationale="x" * 5000, risks="y" * 5000)
+    output = PickerOutput(goals=[GoalPicks(goal="g1", summary="z" * 5000, picks=[long])])
+    rows, _ = check(output, [goal])
+    assert len(rows[0].rationale) == 1200 and rows[0].rationale.endswith("…")
+    assert len(rows[0].risks) == 400 and rows[0].rank == 1
+    assert rows[0].suggested_weight is None  # out of range, so dropped
+    assert len(summaries(output, [goal])[str(goal.category.id)]) == 600
+
+
+def test_an_answer_that_doesnt_parse_is_a_friendly_error(monkeypatch):
+    class Broken:
+        def parse(self, **kw):
+            PickerOutput.model_validate_json('{"goals": [')  # cut off at max_tokens
+    monkeypatch.setattr(ai_picker, "client",
+                        lambda api_key=None: SimpleNamespace(beta=SimpleNamespace(
+                            messages=Broken())))
+    with pytest.raises(AIUnavailable, match="cut short"):
+        ai_picker.rank({})
+
+
+def test_no_prompt_cache_write(monkeypatch):
+    messages, _ = _fake_client(monkeypatch, SimpleNamespace(
+        parsed_output=_out(), stop_reason="end_turn", model="m", usage=None))
+    ai_picker.rank({})
+    assert "cache_control" not in messages.calls[0]

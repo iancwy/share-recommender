@@ -55,6 +55,9 @@ CSS = f"""<style>
 }}
 [data-testid="stDataFrame"], [data-testid="stTable"] {{ font-variant-numeric: tabular-nums; }}
 [data-testid^="stBaseButton"], [data-testid="stTab"] {{ min-height: 44px; }}
+/* Streamlit Community Cloud adds "Fork" and a GitHub link to the header for apps from a
+   public repo. They're for developers, not for the family using the app. */
+[data-testid="stToolbarActions"] {{ display: none; }}
 /* Streamlit puts white text on primary buttons, too faint on the light dark-mode teal. */
 @media (prefers-color-scheme: dark) {{
   [data-testid^="stBaseButton-primary"], [data-testid^="stBaseButton-primary"] * {{
