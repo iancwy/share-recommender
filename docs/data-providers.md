@@ -31,3 +31,31 @@ for the recommender in Week 2. A handful of users, so tens to low hundreds of ca
 4. **Fallback candidates if Yahoo becomes unreliable:** Stooq for ASX/global end-of-day prices,
    or a paid tier of Twelve Data / FMP / EODHD if Ian wants an official, supported feed
    (typically around US$20–30/month for global end-of-day data).
+
+## Discovery, seed lists and fundamentals (Week 5)
+
+- **Discovery** (`MarketDataProvider.discover(exchange, limit)`): the AI picker's candidate
+  pool. Yahoo's screener (`yf.screen` with an `EquityQuery` on the exchange's Yahoo codes, at
+  least US$100m, sorted by market cap) returns name, price, size, P/E, yield, 52-week change,
+  volume and the 200-day average in one request per 100 shares. Foreign listings are left out
+  (Canadian depositary receipts on the TSX, lines quoted in another currency), and share
+  classes of the same company are de-duplicated, keeping the more-traded one. It's shares
+  only; ETF candidates come from the curated list and the watchlist.
+- **Seed lists** (`share_recommender/data/seeds/<EXCHANGE>.csv`): the largest ~150 shares on
+  each exchange (tickers and names), used when discovery fails or is rate-limited. Refresh
+  them every few months and commit the CSVs:
+
+  ```bash
+  python scripts/refresh_seeds.py
+  ```
+
+- **Fundamentals** now include industry, forward P/E, revenue and earnings growth, return on
+  equity, profit margin, debt to equity (as a ratio), beta, average volume, the 52-week high
+  and low, a fund's expense ratio, and the first 300 characters of the description. Yahoo's
+  quirks are handled in `data/yahoo.py`: London prices and 52-week figures are in pence but
+  market cap in pounds, `debtToEquity` and `netExpenseRatio` are percentages, and the yield
+  is a fraction. Known gaps: banks have no debt to equity, and ASX ETFs have no expense ratio
+  or category, so those score 50 (neutral) with a note.
+- **History in bulk**: `get_many_history` fetches several symbols in parallel, skipping
+  Yahoo's NaN gaps. Everything is cached: fundamentals for a week in `fundamentals_cache`,
+  daily prices in `price_cache`.

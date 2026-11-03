@@ -34,6 +34,13 @@ class RecordingQuery:
     def order(self, *_, **__):
         return self
 
+    def limit(self, *_):
+        return self
+
+    def delete(self):
+        self.op = "delete"
+        return self
+
     def update(self, payload):
         self.op, self.payload = "update", payload
         return self
@@ -73,15 +80,24 @@ def test_admin_repository_always_filters_by_person():
     repo.cash_accounts()
     repo.snapshots()
     repo.mark_emailed(["n1"])
+    repo.watchlist()
+    repo.latest_pick_run()
+    repo.picks("run1")
+    repo.prune_pick_runs()
     for q in client.calls:
         column = "id" if q.table == "profiles" else "user_id"
         assert (column, str(me)) in q.filters, (q.table, q.op, q.filters)
 
     # Writes put the person's id on every row.
+    from share_recommender.core.picker import PickRow, PickRun
+
     repo.save_snapshots({"portfolio": {"picks": {}}})
     repo.add_notifications([Message("health", "t", "b")])
-    for q in client.calls[-2:]:
-        assert all(row["user_id"] == str(me) for row in q.payload)
+    repo.save_pick_run(PickRun(trigger="scheduled"), [PickRow(
+        "", "CBA", "ASX", None, "share", "buy", "high", 1, None, None, "r", None, {}, "screen")])
+    for q in client.calls[-4:]:
+        rows = q.payload if isinstance(q.payload, list) else [q.payload]
+        assert all(row["user_id"] == str(me) for row in rows), q.table
 
 
 def test_list_people_pages_through_everyone():
@@ -101,10 +117,14 @@ def test_is_due():
 # The job against in-memory repositories ---------------------------------------
 
 class FakeAdminRepo:
-    def __init__(self, user_id, frequency="daily", email_on=True, fail=False):
+    def __init__(self, user_id, frequency="daily", email_on=True, fail=False,
+                 picker="weekly", answers=False):
         self.user_id = user_id
         self.profile_ = Profile(id=user_id, display_name=f"P{str(user_id)[:4]}",
-                                notify_frequency=frequency, notify_email=email_on)
+                                notify_frequency=frequency, notify_email=email_on,
+                                picker_frequency=picker)
+        self.answers = answers  # interview done, so the picker can run
+        self.runs, self.saved_picks = [], {}
         self.goals = [Category(id=uuid4(), user_id=user_id, name="Kids fund"),
                       Category(id=uuid4(), user_id=user_id, name="House")]
         self.holdings_ = [self._holding("VAS", self.goals[0]), self._holding("VGS", self.goals[1])]
@@ -123,10 +143,33 @@ class FakeAdminRepo:
         return self.profile_
 
     def preferences(self):
-        return None
+        from share_recommender.core.preferences import InvestorPreferences
+
+        return InvestorPreferences(markets=["ASX"]) if self.answers else None
 
     def categories(self):
-        return self.goals, {}
+        from share_recommender.core.preferences import CategoryPreferences
+
+        prefs = CategoryPreferences(horizon_years=10)
+        return self.goals, ({g.id: prefs for g in self.goals} if self.answers else {})
+
+    def watchlist(self):
+        return []
+
+    def latest_pick_run(self):
+        return self.runs[-1] if self.runs else None
+
+    def picks(self, run_id):
+        return self.saved_picks.get(str(run_id), [])
+
+    def save_pick_run(self, run, picks):
+        run = run.model_copy(update={"id": uuid4()})
+        self.runs.append(run)
+        self.saved_picks[str(run.id)] = picks
+        return str(run.id)
+
+    def prune_pick_runs(self, keep=10):
+        self.runs = self.runs[-keep:]
 
     def holdings(self):
         return self.holdings_
@@ -226,3 +269,66 @@ def test_only_one_person_with_user_flag():
     _run(repos, Outbox(), only=f"{repos[b].profile_.display_name}@X.com")
     assert repos[b].stored and not repos[a].stored
     assert isinstance(a, UUID)
+
+
+# The weekly AI picker inside the job --------------------------------------------
+
+def _picker_repos(**kw):
+    a = uuid4()
+    return {a: FakeAdminRepo(a, answers=True, **kw)}
+
+
+def test_the_picker_runs_for_weekly_people_on_mondays():
+    from tests.fakes import StubRanker
+
+    repos = _picker_repos()
+    (repo,) = repos.values()
+    rank = StubRanker()
+    _run(repos, Outbox(), today=TUESDAY, rank_fn=rank)
+    assert rank.payloads == [] and repo.runs == []      # not Monday
+    _run(repos, Outbox(), today=MONDAY, rank_fn=rank)
+    assert len(rank.payloads) == 1 and repo.runs[-1].trigger == "scheduled"
+    _run(repos, Outbox(), today=TUESDAY, rank_fn=rank, force=True)
+    assert len(repo.runs) >= 1                           # --force runs it any day
+
+    off = _picker_repos(picker="off")
+    rank = StubRanker()
+    _run(off, Outbox(), today=MONDAY, rank_fn=rank)
+    assert rank.payloads == []
+
+
+def test_the_picker_is_skipped_without_a_key_or_with_no_picker(caplog):
+    repos = _picker_repos()
+    (repo,) = repos.values()
+    assert _run(repos, Outbox(), today=MONDAY, rank_fn=None) == 0
+    assert repo.runs == [] and "no ANTHROPIC_API_KEY" in caplog.text
+
+    from tests.fakes import StubRanker
+    rank = StubRanker()
+    _run(repos, Outbox(), today=MONDAY, rank_fn=rank, picker=False)
+    assert rank.payloads == []
+
+
+def test_a_picker_failure_still_sends_notifications():
+    from share_recommender.ai.client import AIUnavailable
+    from tests.fakes import StubRanker
+
+    repos = _picker_repos(frequency="weekly")
+    (repo,) = repos.values()
+    _run(repos, Outbox(), today=MONDAY, picker=False)  # baseline
+    _change_both_goals(repo)
+    outbox = Outbox()
+    failures = _run(repos, outbox, today=MONDAY, rank_fn=StubRanker(AIUnavailable("busy")))
+    assert failures == 1                   # counted, so the job exits non-zero
+    assert repo.notifications and outbox.sent  # but the email still went
+
+
+def test_dry_run_runs_the_picker_but_saves_nothing(capsys):
+    from tests.fakes import StubRanker
+
+    repos = _picker_repos()
+    (repo,) = repos.values()
+    rank = StubRanker()
+    _run(repos, Outbox(), today=MONDAY, rank_fn=rank, dry_run=True)
+    assert len(rank.payloads) == 1 and repo.runs == [] and not repo.stored
+    assert "AI pick 1. buy" in capsys.readouterr().out

@@ -19,8 +19,12 @@ and installs `requirements.txt`.
    SUPABASE_ANON_KEY = "<anon / publishable key>"
    MARKET_DATA_PROVIDER = "yahoo"
    DEFAULT_EXCHANGE = "ASX"
-   ANTHROPIC_API_KEY = "<optional>"
+   ANTHROPIC_API_KEY = "<your Anthropic API key>"
    ```
+
+   The Picker page needs `ANTHROPIC_API_KEY` (Claude ranks the shortlist); without it the
+   page shows the screen's results unranked. The weekly picker in the notifications job uses
+   its own copy, the `ANTHROPIC_API_KEY` GitHub Actions secret.
 
    **Never add the service role key here.** It's only for the notifications job, as a
    GitHub Actions secret. Cloud exposes these root-level secrets as environment variables,

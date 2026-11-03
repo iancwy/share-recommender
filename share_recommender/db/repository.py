@@ -4,9 +4,11 @@ The repository never filters by user id itself: row-level security in Postgres
 does that, so a bug here cannot leak one person's portfolio to another.
 """
 
-from datetime import datetime
+from datetime import UTC, datetime, timedelta, timezone
 from typing import Any
 from uuid import UUID
+
+from postgrest.exceptions import APIError
 
 from share_recommender.core.models import (
     CashAccount,
@@ -19,7 +21,10 @@ from share_recommender.core.models import (
     HoldingIn,
     Profile,
     ProfileIn,
+    WatchlistItem,
+    WatchlistItemIn,
 )
+from share_recommender.core.picker import PickRow, PickRun, pick_from_record, pick_record
 from share_recommender.core.preferences import CategoryPreferences, InvestorPreferences
 from supabase import Client
 
@@ -28,7 +33,20 @@ def _now() -> str:
     return datetime.now().astimezone().isoformat()
 
 
-def _payload(model: CategoryIn | HoldingIn | CashAccountIn | DividendIn) -> dict[str, Any]:
+def sydney_midnight() -> datetime:
+    """The start of today in Sydney, as an aware datetime."""
+    try:
+        from zoneinfo import ZoneInfo
+
+        now = datetime.now(ZoneInfo("Australia/Sydney"))
+    except Exception:  # no time zone database (e.g. Windows without tzdata): close enough
+        now = datetime.now(UTC) + timedelta(hours=10)
+        now = now.replace(tzinfo=timezone(timedelta(hours=10)))
+    return now.replace(hour=0, minute=0, second=0, microsecond=0)
+
+
+def _payload(model: CategoryIn | HoldingIn | CashAccountIn | DividendIn | WatchlistItemIn
+             ) -> dict[str, Any]:
     return model.model_dump(mode="json")
 
 
@@ -235,3 +253,66 @@ class PortfolioRepository:
 
     def delete_dividend(self, dividend_id: UUID) -> None:
         self._db.table("dividends").delete().eq("id", str(dividend_id)).execute()
+
+    # Watchlist -----------------------------------------------------------
+
+    def list_watchlist(self) -> list[WatchlistItem]:
+        rows = self._db.table("watchlist").select("*").order("ticker").execute().data
+        return [WatchlistItem.model_validate(r) for r in rows]
+
+    def get_watchlist_item(self, item_id: UUID) -> WatchlistItem | None:
+        rows = self._db.table("watchlist").select("*").eq("id", str(item_id)).execute().data
+        return WatchlistItem.model_validate(rows[0]) if rows else None
+
+    def add_to_watchlist(self, item: WatchlistItemIn) -> WatchlistItem:
+        try:
+            rows = self._db.table("watchlist").insert(_payload(item)).execute().data
+        except APIError as exc:
+            if exc.code == "23505":  # unique violation: already there
+                raise ValueError("Already on your watchlist") from exc
+            raise
+        return WatchlistItem.model_validate(rows[0])
+
+    def update_watchlist_item(self, item_id: UUID, item: WatchlistItemIn) -> WatchlistItem:
+        rows = (self._db.table("watchlist").update(_payload(item)).eq("id", str(item_id))
+                .execute().data)
+        if not rows:
+            raise LookupError(f"Watchlist item {item_id} not found")
+        return WatchlistItem.model_validate(rows[0])
+
+    def remove_from_watchlist(self, item_id: UUID) -> None:
+        self._db.table("watchlist").delete().eq("id", str(item_id)).execute()
+
+    # AI picker runs and picks (a record: written once, never edited) ------
+
+    def latest_pick_run(self, include_failed: bool = False) -> PickRun | None:
+        query = self._db.table("pick_runs").select("*")
+        if not include_failed:
+            query = query.eq("status", "ok")
+        rows = query.order("created_at", desc=True).limit(1).execute().data
+        return PickRun.model_validate(rows[0]) if rows else None
+
+    def list_picks(self, run_id: UUID | str) -> list[PickRow]:
+        rows = (self._db.table("ai_picks").select("*").eq("run_id", str(run_id))
+                .order("rank").execute().data)
+        return [pick_from_record(r) for r in rows]
+
+    def save_pick_run(self, run: PickRun, picks: list[PickRow]) -> str:
+        run_id = self._db.table("pick_runs").insert(run.record()).execute().data[0]["id"]
+        if picks:
+            self._db.table("ai_picks").insert([pick_record(p, run_id) for p in picks]).execute()
+        return run_id
+
+    def pick_runs_today(self) -> int:
+        """Manual runs since midnight in Sydney (for the daily limit)."""
+        rows = (self._db.table("pick_runs").select("id").eq("trigger", "manual")
+                .gte("created_at", sydney_midnight().isoformat()).execute().data)
+        return len(rows)
+
+    def prune_pick_runs(self, keep: int = 10) -> None:
+        """Delete all but the newest ``keep`` runs; their picks go with them."""
+        rows = (self._db.table("pick_runs").select("id").order("created_at", desc=True)
+                .execute().data)
+        old = [r["id"] for r in rows[keep:]]
+        if old:
+            self._db.table("pick_runs").delete().in_("id", old).execute()

@@ -18,6 +18,7 @@ from pydantic import ValidationError
 from share_recommender.ai import interview
 from share_recommender.ai.client import AIUnavailable
 from share_recommender.ai.explain import explain
+from share_recommender.ai.picker import rank
 from share_recommender.config import get_settings
 from share_recommender.core.category_templates import CATEGORY_TEMPLATES
 from share_recommender.core.exchanges import EXCHANGES
@@ -43,18 +44,33 @@ from share_recommender.core.models import (
     HoldingIn,
     ProfileIn,
     RiskLevel,
+    WatchlistItem,
+    WatchlistItemIn,
 )
 from share_recommender.core.performance import Dimension, breakdown, goal_progress
+from share_recommender.core.picker import AI_DISCLAIMER, PickRow, PickRun
 from share_recommender.core.portfolio import UNCATEGORISED, totals_by_currency, value_holdings
 from share_recommender.core.preferences import CategoryPreferences, GoalStyle, InvestorPreferences
 from share_recommender.core.questionnaire import ABOUT_YOU, GOAL, Question
 from share_recommender.core.recommender import Recommendation, horizon_years, is_speculative
+from share_recommender.core.universe import Kind
+from share_recommender.core.watchlist import watch_rows
 from share_recommender.data import Fundamentals, Quote, get_provider
+from share_recommender.data.base import Candidate
+from share_recommender.data.candidates import candidate_pool
+from share_recommender.data.fundamentals_cache import CachedFundamentals
 from share_recommender.data.history import CachedHistory
+from share_recommender.db.fundamentals_store import SupabaseFundamentalsStore
 from share_recommender.db.price_store import SupabasePriceStore
 from share_recommender.db.repository import PortfolioRepository
 from share_recommender.db.supabase_client import SupabaseNotConfigured, anon_client
 from share_recommender.notifier import build_notifications
+from share_recommender.picker_service import (
+    DAILY_LIMIT,
+    KEEP_RUNS,
+    PickerNotReady,
+    run_picker,
+)
 from share_recommender.portfolio_service import (
     health_report,
     portfolio_history,
@@ -63,7 +79,8 @@ from share_recommender.portfolio_service import (
     valued_holdings,
 )
 from share_recommender.recommendations import build_recommendation
-from share_recommender.ui.theme import CSS, ICON, PALETTE, SEVERITY_BADGE
+from share_recommender.ui.theme import ACTION_BADGE, CSS, ICON, PALETTE, SEVERITY_BADGE
+from share_recommender.watchlist_service import prepare_item
 from supabase import Client
 
 
@@ -180,18 +197,24 @@ def _platform_input(container, platforms: list[str], current: str | None, key: s
 
 
 def _holding_form(key: str, categories: list[Category], platforms: list[str],
-                  default_platform: str, existing: Holding | None = None) -> HoldingIn | None:
-    """Render the add/edit form. Returns validated input when submitted, else None."""
+                  default_platform: str, existing: Holding | None = None,
+                  prefill: HoldingIn | None = None) -> HoldingIn | None:
+    """Render the add/edit form. Returns validated input when submitted, else None.
+
+    ``existing`` edits a holding; ``prefill`` is an add form with values already filled in
+    (for example from a watchlist item).
+    """
     settings = get_settings()
     exchanges = list(EXCHANGES)
     cat_ids = [c.id for c in categories] + [None]
     cat_names = {c.id: c.name for c in categories} | {None: "Uncategorised"}
-    default_exchange = existing.exchange if existing else settings.default_exchange.upper()
-    current_platform = existing.platform if existing else default_platform
+    source = existing or prefill
+    default_exchange = source.exchange if source else settings.default_exchange.upper()
+    current_platform = source.platform if source else default_platform
 
     with st.form(key, clear_on_submit=existing is None):
         c1, c2 = st.columns(2)
-        ticker = c1.text_input("Ticker", value=existing.ticker if existing else "",
+        ticker = c1.text_input("Ticker", value=source.ticker if source else "",
                                placeholder="e.g. VAS")
         exchange = c2.selectbox(
             "Exchange", exchanges,
@@ -200,22 +223,25 @@ def _holding_form(key: str, categories: list[Category], platforms: list[str],
         )
         c3, c4 = st.columns(2)
         units = c3.number_input("Units", min_value=0.0, step=1.0, format="%.4f",
-                                value=float(existing.units) if existing else 0.0)
+                                value=float(source.units) if source else 0.0,
+                                key=f"{key}_units")
         buy_price = c4.number_input("Buy price per unit", min_value=0.0, step=0.01, format="%.4f",
-                                    value=float(existing.buy_price) if existing else 0.0)
+                                    value=float(source.buy_price) if source else 0.0,
+                                    key=f"{key}_price")
         c5, c6 = st.columns(2)
         fees = c5.number_input("Fees / brokerage", min_value=0.0, step=1.0, format="%.2f",
-                               value=float(existing.fees) if existing else 0.0)
-        buy_date = c6.date_input("Buy date", value=existing.buy_date if existing else date.today(),
+                               value=float(source.fees) if source else 0.0)
+        buy_date = c6.date_input("Buy date", value=source.buy_date if source else date.today(),
                                  max_value=date.today(), format="DD/MM/YYYY")
         c7, c8 = st.columns(2)
         category_id = c7.selectbox(
             "Category", cat_ids,
-            index=cat_ids.index(existing.category_id) if existing else 0,
+            index=cat_ids.index(source.category_id) if source and source.category_id in cat_ids
+            else 0,
             format_func=lambda cid: cat_names[cid],
         )
         platform = _platform_input(c8, platforms, current_platform, f"{key}_platform")
-        notes = st.text_input("Notes", value=(existing.notes or "") if existing else "")
+        notes = st.text_input("Notes", value=(source.notes or "") if source else "")
         submitted = st.form_submit_button("Save changes" if existing else "Add holding",
                                           type="primary")
 
@@ -446,6 +472,172 @@ def _cash_page(repo: PortfolioRepository) -> None:
         repo.delete_cash_account(selected.id)
         st.toast(f"Deleted {selected.label}")
         st.rerun()
+
+
+# Watchlist --------------------------------------------------------------------
+
+def _watch_form(key: str, categories: list[Category], existing: WatchlistItem | None = None
+                ) -> WatchlistItemIn | None:
+    """Add form (ticker and exchange), or for an existing item just its goal, alerts and notes."""
+    cat_ids = [None] + [c.id for c in categories]
+    cat_names = {c.id: c.name for c in categories} | {None: "Any goal"}
+    exchanges = list(EXCHANGES)
+    default_exchange = get_settings().default_exchange.upper()
+    with st.form(key, clear_on_submit=existing is None):
+        if existing is None:
+            c1, c2 = st.columns(2)
+            ticker = c1.text_input("Ticker", placeholder="e.g. CBA", key=f"{key}_ticker")
+            exchange = c2.selectbox(
+                "Exchange", exchanges, key=f"{key}_exchange",
+                index=exchanges.index(default_exchange) if default_exchange in exchanges else 0,
+                format_func=lambda code: f"{code} ({EXCHANGES[code].currency})")
+        else:
+            ticker, exchange = existing.ticker, existing.exchange
+        category_id = st.selectbox(
+            "Goal (optional)", cat_ids, format_func=lambda cid: cat_names[cid],
+            index=cat_ids.index(existing.category_id) if existing and existing.category_id
+            in cat_ids else 0, key=f"{key}_goal")
+        c3, c4 = st.columns(2)
+        below = c3.number_input("Alert me if it falls to", min_value=0.0, step=0.01,
+                                format="%.2f", key=f"{key}_below",
+                                value=float(existing.alert_below) if existing and
+                                existing.alert_below else None,
+                                help="In the exchange's currency. Leave blank for no alert.")
+        above = c4.number_input("Alert me if it rises to", min_value=0.0, step=0.01,
+                                format="%.2f", key=f"{key}_above",
+                                value=float(existing.alert_above) if existing and
+                                existing.alert_above else None)
+        notes = st.text_input("Notes", value=(existing.notes or "") if existing else "",
+                              key=f"{key}_notes")
+        submitted = st.form_submit_button("Save changes" if existing else "Add to watchlist",
+                                          type="primary")
+    if not submitted:
+        return None
+    try:
+        fields = existing.model_dump(include=set(WatchlistItemIn.model_fields)) if existing \
+            else {"ticker": ticker, "exchange": exchange}
+        return WatchlistItemIn(**fields | {
+            "category_id": category_id, "notes": notes,
+            "alert_below": Decimal(str(below)) if below else None,
+            "alert_above": Decimal(str(above)) if above else None})
+    except ValidationError as exc:
+        _show_errors(exc)
+        return None
+
+
+def _watchlist_page(repo: PortfolioRepository) -> None:
+    st.caption("Shares and ETFs you're keeping an eye on without owning. Set price alerts, and "
+               "turn one into a holding when you buy it.")
+    categories = repo.list_categories()
+    profile = repo.get_profile()
+    base = profile.base_currency if profile else "AUD"
+
+    st.subheader("Add to your watchlist")
+    new = _watch_form("add_watch", categories)
+    if new:
+        try:
+            with st.spinner(f"Looking up {new.ticker}…"):
+                item = prepare_item(new, _quotes, _fundamentals)
+            repo.add_to_watchlist(item)
+            st.toast(f"Added {item.ticker} to your watchlist")
+            st.rerun()
+        except ValueError as exc:
+            st.error(str(exc))
+
+    st.divider()
+    items = repo.list_watchlist()
+    if not items:
+        st.info("Nothing on your watchlist yet. Add a ticker above, or add one from the Picker "
+                "page.")
+        return
+
+    st.subheader(f"Your watchlist ({len(items)})")
+    held = {(h.ticker, h.exchange) for h in repo.list_holdings()}
+    keys = tuple(sorted(i.key for i in items))
+    today = date.today()
+    with st.spinner("Fetching prices and figures…"):
+        quotes = _quotes(keys)
+        fundamentals = _fundamentals(keys)
+        history, _ = _history(keys, (), base, today - timedelta(days=370), today)
+        fx = _fx_rates(base, tuple(sorted({i.currency for i in items} - {base})))
+    rows = watch_rows(items, quotes, fundamentals, history, base, fx, held, today)
+    names = {c.id: c.name for c in categories}
+
+    def num(v):
+        return float(v) if v is not None else None
+
+    df = pd.DataFrame([{
+        "Ticker": r.item.ticker, "Exchange": r.item.exchange, "Name": r.item.name or "",
+        "Goal": names.get(r.item.category_id, "Any goal") if r.item.category_id else "Any goal",
+        "Price": num(r.price), "Ccy": r.currency, "Day %": num(r.day_pct),
+        "Since added %": num(r.since_added_pct), "1y %": num(r.year_pct),
+        "52-week range": num(r.range_pos), "P/E": num(r.pe_ratio),
+        "Yield %": num(r.dividend_yield_pct), "Market cap": r.market_cap or "",
+        "Alerts": r.alerts, "Held": "Yes" if r.held else "", "Notes": r.item.notes or "",
+    } for r in rows])
+    pct = st.column_config.NumberColumn(format="%.1f%%")
+    columns = {"Price": st.column_config.NumberColumn(format="%.2f"), "Day %": pct,
+               "Since added %": pct, "1y %": pct, "Yield %": pct,
+               "P/E": st.column_config.NumberColumn(format="%.1f"),
+               "52-week range": st.column_config.ProgressColumn(
+                   min_value=0, max_value=100, format="%d%%",
+                   help="Where the price sits between its 52-week low (0%) and high (100%)")}
+    st.dataframe(df[["Ticker", "Price", "Day %", "1y %", "Alerts"]], hide_index=True,
+                 column_config=columns)
+    with st.expander("All columns"):
+        st.dataframe(df, hide_index=True, column_config=columns)
+    if any(r.price is None or r.year_pct is None for r in rows):
+        st.caption("Blanks mean the data provider has nothing for that figure right now.")
+
+    st.subheader("Edit, remove or buy")
+    selected = st.selectbox("Watchlist item", items, index=None, key="watch_pick",
+                            placeholder="Choose an item",
+                            format_func=lambda w: f"{w.ticker} ({w.exchange})"
+                                                  + (f" · {w.name}" if w.name else ""))
+    if selected is None:
+        return
+    action = st.radio("What would you like to do?", ["Edit", "Remove", "Convert to holding"],
+                      horizontal=True, key=f"watch_action_{selected.id}")
+    if action == "Edit":
+        updated = _watch_form(f"edit_watch_{selected.id}", categories, existing=selected)
+        if updated:
+            repo.update_watchlist_item(selected.id, updated)
+            st.toast(f"Updated {selected.ticker}")
+            st.rerun()
+    elif action == "Remove":
+        confirm = st.checkbox("Yes, I want to remove it", key=f"confirm_watch_{selected.id}")
+        if st.button("Remove from watchlist", disabled=not confirm,
+                     key=f"remove_watch_{selected.id}"):
+            repo.remove_from_watchlist(selected.id)
+            st.toast(f"Removed {selected.ticker}")
+            st.rerun()
+    else:
+        _convert_to_holding(repo, selected, quotes.get(selected.key), categories)
+
+
+def _convert_to_holding(repo: PortfolioRepository, item: WatchlistItem, quote,
+                        categories: list[Category], from_watchlist: bool = True) -> None:
+    """The add-holding form, filled in from a watchlist item (or an AI pick), for the person
+    to finish."""
+    profile = repo.get_profile()
+    default_platform = profile.platform_for_new if profile else FALLBACK_PLATFORM
+    price = quote.price if quote else item.added_price
+    prefill = HoldingIn.model_construct(  # units 0 for the person to fill in
+        ticker=item.ticker, exchange=item.exchange, units=Decimal(0),
+        buy_price=price or Decimal(0), buy_date=date.today(), fees=Decimal(0),
+        platform=default_platform, category_id=item.category_id, notes=None)
+    platforms = _platform_options(repo.list_holdings(), default_platform)
+    holding = _holding_form(f"convert_{item.id}", categories, platforms, default_platform,
+                            prefill=prefill)
+    remove = from_watchlist and st.checkbox("Remove it from my watchlist", value=True,
+                                            key=f"convert_remove_{item.id}")
+    st.caption("The buy price is today's price. Change it to what you actually paid.")
+    if holding:
+        repo.create_holding(holding)
+        if remove:
+            repo.remove_from_watchlist(item.id)
+        st.toast(f"Added {holding.units.normalize():,f} × {holding.ticker} to your holdings")
+        st.switch_page(NAV["Holdings"])
 
 
 # Categories -------------------------------------------------------------------
@@ -859,6 +1051,214 @@ def _recommendations_page(repo: PortfolioRepository) -> None:
         with st.container(border=True):
             st.markdown(text)
             st.caption("Written by Claude from the tool's results.")
+    _ai_picks_box(repo, cat.id)
+
+
+# AI picker ----------------------------------------------------------------------
+
+@st.cache_data(ttl=24 * 60 * 60, show_spinner=False)
+def _candidate_pool(markets: tuple[str, ...]) -> list[Candidate]:
+    return candidate_pool(get_provider(), list(markets))
+
+
+@st.cache_data(ttl=24 * 60 * 60, show_spinner=False)
+def _picker_fundamentals(symbols: tuple[tuple[str, str], ...]
+                         ) -> dict[tuple[str, str], Fundamentals | None]:
+    """Company figures through the shared week-long cache in Supabase."""
+    return CachedFundamentals(get_provider(), SupabaseFundamentalsStore(_client())).get_many(
+        list(symbols))
+
+
+@st.cache_data(ttl=12 * 60 * 60, show_spinner=False)
+def _picker_history(symbols: tuple[tuple[str, str], ...], start: date, end: date):
+    return get_provider().get_many_history(list(symbols), start, end)
+
+
+def _run_label(run: PickRun) -> str:
+    when = run.created_at.astimezone() if run.created_at else None
+    text = when.strftime("%a %d/%m/%Y, ") + when.strftime("%I:%M%p").lstrip("0").lower() \
+        if when else "just now"
+    return f"Last run {text}, {'weekly' if run.trigger == 'scheduled' else 'on demand'}"
+
+
+def _run_picker_now(repo: PortfolioRepository, latest: PickRun | None) -> None:
+    inv = repo.get_preferences()
+    categories = repo.list_categories()
+    profile = repo.get_profile()
+    base = profile.base_currency if profile else "AUD"
+    try:
+        with st.status("Running the picker…", expanded=True) as status:
+            result = run_picker(
+                categories=categories,
+                goal_prefs={c.id: repo.get_category_preferences(c.id) for c in categories},
+                holdings=repo.list_holdings(), cash_accounts=repo.list_cash_accounts(),
+                watchlist=repo.list_watchlist(), inv=inv, base=base, quotes_fn=_quotes,
+                fx_fn=_fx_rates, fundamentals_fn=_picker_fundamentals,
+                history_fn=_picker_history, pool_fn=lambda m: _candidate_pool(tuple(m)),
+                rank_fn=rank, today=date.today(), trigger="manual", latest=latest,
+                progress=status.write)
+            status.update(label="Done", state="complete" if result.run.status == "ok"
+                          else "error")
+    except PickerNotReady as exc:
+        st.info(str(exc))
+        return
+    names = {str(c.id): c.name for c in categories}
+    st.session_state["picker_unranked"] = {
+        names.get(goal_id, "Goal"): [i for i in s.items if i.score is not None][:5]
+        for goal_id, s in result.shortlists.items()}
+    if result.reused:
+        st.toast("Nothing has changed since the last run, so it's shown again")
+        return
+    repo.save_pick_run(result.run, result.picks)
+    repo.prune_pick_runs(KEEP_RUNS)
+    st.rerun()
+
+
+def _unranked(shortlists: dict[str, list]) -> None:
+    st.markdown("**The screen's top 5 per goal, not yet ranked by Claude:**")
+    for goal, items in shortlists.items():
+        st.markdown(f"*{goal}*")
+        st.dataframe(pd.DataFrame([
+            {"Ticker": i.key[0], "Exchange": i.key[1], "Name": i.name or "",
+             "Type": "ETF" if i.kind == "etf" else "Share", "Sector": i.sector or "",
+             "Score": i.score} for i in items]), hide_index=True)
+
+
+def _pick_line(m: dict) -> str:
+    parts = []
+    if m.get("pe") is not None:
+        parts.append(f"P/E {m['pe']:.1f}")
+    if m.get("yield_pct") is not None:
+        parts.append(f"yield {m['yield_pct']:.1f}%")
+    if m.get("return_12m_pct") is not None:
+        parts.append(f"12 months {m['return_12m_pct']:+.0f}%")
+    if m.get("market_cap"):
+        parts.append(f"size {m['market_cap']}")
+    if m.get("expense_ratio_pct") is not None:
+        parts.append(f"fee {m['expense_ratio_pct']:.2f}%")
+    return " · ".join(parts)
+
+
+def _pick_card(repo: PortfolioRepository, p: PickRow, watched: set, held: set,
+               categories: list[Category]) -> None:
+    key = f"{p.goal_id}_{p.ticker}_{p.exchange}"
+    with st.container(border=True):
+        title = f"**{p.rank}. {p.ticker}**" + (f" · {p.name}" if p.name else "")
+        st.markdown(f"{title}  \n{ACTION_BADGE[p.action]} · {p.conviction} conviction"
+                    + (f" · suggested {p.suggested_weight:g}% of the goal"
+                       if p.suggested_weight is not None else "")
+                    + (f" · score {p.score:.0f}" if p.score is not None else ""))
+        if line := _pick_line(p.metrics):
+            st.caption(f"{p.exchange} · {line}")
+        st.markdown(p.rationale)
+        if p.risks:
+            st.caption(f"Risks: {p.risks}")
+        if p.action != "buy":
+            return
+        c1, c2 = st.columns(2)
+        if (p.ticker, p.exchange) not in watched | held and c1.button(
+                "Add to watchlist", key=f"pick_watch_{key}", icon=":material/visibility:"):
+            price = p.metrics.get("price")
+            try:
+                repo.add_to_watchlist(WatchlistItemIn(
+                    ticker=p.ticker, exchange=p.exchange, name=p.name,
+                    kind=Kind.ETF if p.kind == "etf" else Kind.SHARE,
+                    category_id=UUID(p.goal_id) if p.goal_id else None,
+                    added_price=Decimal(str(price)) if price else None, source="picker"))
+                st.toast(f"Added {p.ticker} to your watchlist")
+                st.rerun()
+            except ValueError as exc:
+                st.error(str(exc))
+        if c2.button("Add as holding", key=f"pick_hold_{key}", icon=":material/add:"):
+            st.session_state["pick_convert"] = key
+        if st.session_state.get("pick_convert") == key:
+            price = p.metrics.get("price")
+            item = WatchlistItem.model_construct(
+                id=key, ticker=p.ticker, exchange=p.exchange, name=p.name,
+                category_id=UUID(p.goal_id) if p.goal_id else None,
+                added_price=Decimal(str(price)) if price else None)
+            _convert_to_holding(repo, item, _quotes(((p.ticker, p.exchange),)).get(
+                (p.ticker, p.exchange)), categories, from_watchlist=False)
+
+
+def _picker_page(repo: PortfolioRepository) -> None:
+    latest = repo.latest_pick_run()
+    newest = repo.latest_pick_run(include_failed=True)
+    runs_today = repo.pick_runs_today()
+    c1, c2 = st.columns([3, 1], vertical_alignment="center")
+    if latest:
+        c1.markdown(f"{_run_label(latest)}. {latest.pool_size} shares and ETFs screened, "
+                    f"{latest.shortlisted} shortlisted.")
+    else:
+        c1.markdown("Finds shares and ETFs that fit each of your goals: a rules screen, then "
+                    "Claude ranks the shortlist.")
+    limit_reached = runs_today >= DAILY_LIMIT
+    if c2.button("Run the picker now", type="primary", disabled=limit_reached,
+                 icon=":material/auto_awesome:", key="run_picker"):
+        _run_picker_now(repo, latest)
+    if limit_reached:
+        st.info(f"You've run the picker {DAILY_LIMIT} times today, the daily limit. It runs "
+                "again automatically on Mondays, or try tomorrow.")
+    if newest and newest.status == "failed" and (latest is None or (
+            newest.created_at and latest.created_at and newest.created_at > latest.created_at)):
+        st.warning(f"The last run didn't finish: {newest.error}")
+    if unranked := st.session_state.get("picker_unranked"):
+        if newest is None or newest.status == "failed":
+            _unranked(unranked)
+    if latest is None:
+        st.info("No picks yet. Press **Run the picker now** (it takes a minute or two).")
+        return
+
+    picks = repo.list_picks(latest.id)
+    goals = latest.summary.get("goals", {})
+    categories = repo.list_categories()
+    watched = {w.key for w in repo.list_watchlist()}
+    held = {(h.ticker, h.exchange) for h in repo.list_holdings()}
+    goal_ids = [g for g in goals if any(p.goal_id == g for p in picks)] or list(goals)
+    if not goal_ids:
+        st.info("The last run found nothing to suggest.")
+    for tab, goal_id in zip(st.tabs([goals[g]["name"] for g in goal_ids]), goal_ids,
+                            strict=True):
+        with tab:
+            if text := goals[goal_id].get("summary"):
+                st.markdown(text)
+            for p in [p for p in picks if p.goal_id == goal_id]:
+                _pick_card(repo, p, watched, held, categories)
+    for skipped in latest.summary.get("skipped", []):
+        st.caption(f"{skipped} was skipped: answer its questions on the Preferences page.")
+
+    with st.expander("How this works"):
+        st.markdown(
+            "A rules screen looks at the largest shares on your chosen exchanges, the tool's "
+            "list of ETFs, your watchlist and what you hold. It drops anything that doesn't "
+            "fit (industries you avoid, bond funds, too small or too new) and scores the rest "
+            "on momentum, quality, value, income, growth and stability. Claude then ranks "
+            "each goal's shortlist against your answers and goals. Claude only sees the "
+            "figures shown here.")
+        warnings = latest.summary.get("warnings", [])
+        if warnings:
+            st.markdown(f"**{len(warnings)} adjustment(s) to Claude's answer:**\n"
+                        + "\n".join(f"- {w}" for w in warnings))
+    st.caption(AI_DISCLAIMER)
+
+
+def _ai_picks_box(repo: PortfolioRepository, category_id) -> None:
+    """The top three buy ideas for a goal from the latest picker run, if there is one."""
+    try:
+        run = repo.latest_pick_run()
+        picks = repo.list_picks(run.id) if run else []
+    except APIError:  # the picker migration hasn't been run yet
+        return
+    buys = [p for p in picks if p.goal_id == str(category_id) and p.action == "buy"][:3]
+    if not buys:
+        return
+    with st.container(border=True):
+        st.markdown("**AI picks for this goal**")
+        for p in buys:
+            reason = p.rationale.split(". ")[0].rstrip(".") + "."
+            st.markdown(f"- **{p.ticker}** ({p.conviction} conviction): {reason}")
+        st.page_link(NAV["Picker"], label="See all picks", icon=":material/auto_awesome:")
+        st.caption(AI_DISCLAIMER)
 
 
 # Charts -----------------------------------------------------------------------
@@ -1389,6 +1789,15 @@ def _notifications_page(repo: PortfolioRepository) -> None:
         _preview_changes(repo)
 
 
+def _latest_picks(repo: PortfolioRepository):
+    """The latest AI picker run's picks, or None (no run yet, or no picker tables)."""
+    try:
+        run = repo.latest_pick_run()
+        return repo.list_picks(run.id) if run else None
+    except APIError:
+        return None
+
+
 def _preview_changes(repo: PortfolioRepository) -> None:
     categories = repo.list_categories()
     profile = repo.get_profile()
@@ -1400,7 +1809,8 @@ def _preview_changes(repo: PortfolioRepository) -> None:
             inv=repo.get_preferences(), base=profile.base_currency if profile else "AUD",
             old_snapshots=repo.get_snapshots(), quotes_fn=_quotes, fx_fn=_fx_rates,
             fundamentals_fn=_fundamentals, history_fn=_history, today=date.today(),
-            weekly=bool(profile and profile.notify_frequency == "weekly"))
+            weekly=bool(profile and profile.notify_frequency == "weekly"),
+            watchlist=repo.list_watchlist(), picks=_latest_picks(repo))
     if outcome.baseline:
         st.info("There's no earlier check to compare with yet. The first scheduled check will "
                 "record where things stand.")
@@ -1412,7 +1822,6 @@ def _preview_changes(repo: PortfolioRepository) -> None:
             st.markdown(f"- **{m.goal or 'Portfolio'}: {m.title}**: {m.body}")
 
 
-# Profile ----------------------------------------------------------------------
 # Profile ----------------------------------------------------------------------
 
 def _profile_page(repo: PortfolioRepository, email: str) -> None:
@@ -1441,12 +1850,19 @@ def _profile_page(repo: PortfolioRepository, email: str) -> None:
         notify_email = st.checkbox("Email me about new recommendations", key="profile_email",
                                    value=profile.notify_email,
                                    help="Otherwise they only appear on the Notifications page.")
+        picker_options = list(PICKER_LABELS)
+        picker = st.selectbox("Run the AI picker automatically", picker_options,
+                              key="profile_picker",
+                              index=picker_options.index(profile.picker_frequency),
+                              format_func=PICKER_LABELS.get,
+                              help="New buy ideas are sent with your notifications.")
         if st.form_submit_button("Save", type="primary"):
             try:
                 repo.update_profile(ProfileIn(display_name=name, base_currency=ccy,
                                               default_platform=platform,
                                               notify_email=notify_email,
-                                              notify_frequency=frequency))
+                                              notify_frequency=frequency,
+                                              picker_frequency=picker))
                 st.toast("Profile saved")
                 st.rerun()
             except ValidationError as exc:
@@ -1518,7 +1934,7 @@ def _page(name: str, render, repo: PortfolioRepository, email: str):
 
 
 MISSING_SCHEMA = {"42703", "42P01", "PGRST204", "PGRST205"}  # a missing column or table
-FOOTER_PAGES = {"Dashboard", "Recommendations", "Health check", "Notifications"}
+FOOTER_PAGES = {"Dashboard", "Recommendations", "Picker", "Health check", "Notifications"}
 
 
 def _price_message(priced: list[bool]) -> None:
@@ -1533,6 +1949,7 @@ def _price_message(priced: list[bool]) -> None:
 
 
 FREQUENCY_LABELS = {"off": "Off", "daily": "Daily on weekdays", "weekly": "Weekly on Mondays"}
+PICKER_LABELS = {"off": "Off", "weekly": "Weekly on Mondays"}
 
 
 def _unread(repo: PortfolioRepository) -> int:
@@ -1546,10 +1963,12 @@ PAGES = {  # name -> (icon, page function); Profile also needs the email
     "Dashboard": (":material/dashboard:", _dashboard_page),
     "Holdings": (":material/list_alt:", _holdings_page),
     "Cash": (":material/savings:", _cash_page),
+    "Watchlist": (":material/visibility:", _watchlist_page),
     "Import": (":material/upload_file:", _import_page),
     "Categories": (":material/category:", _categories_page),
     "Preferences": (":material/tune:", _preferences_page),
     "Recommendations": (":material/lightbulb:", _recommendations_page),
+    "Picker": (":material/auto_awesome:", _picker_page),
     "Dividends": (":material/payments:", _dividends_page),
     "Health check": (":material/health_and_safety:", _health_page),
     "Notifications": (":material/notifications:", _notifications_page),

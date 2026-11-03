@@ -1,0 +1,151 @@
+ticker,name
+AAPL,Apple Inc.
+NVDA,NVIDIA Corporation
+MSFT,Microsoft Corporation
+GOOGL,Alphabet Inc.
+AMZN,"Amazon.com, Inc."
+SPCX,Space Exploration Technologies Corp.
+TSLA,"Tesla, Inc."
+META,"Meta Platforms, Inc."
+AVGO,Broadcom Inc.
+SKHY,SK hynix Inc.
+WMT,Walmart Inc.
+MU,"Micron Technology, Inc."
+AMD,"Advanced Micro Devices, Inc."
+ASML,ASML Holding N.V.
+COST,Costco Wholesale Corporation
+PLTR,Palantir Technologies Inc.
+CSCO,"Cisco Systems, Inc."
+INTC,Intel Corporation
+AMAT,"Applied Materials, Inc."
+PANW,"Palo Alto Networks, Inc."
+LRCX,Lam Research Corporation
+TXN,Texas Instruments Incorporated
+NFLX,"Netflix, Inc."
+AMGN,Amgen Inc.
+CRWD,"CrowdStrike Holdings, Inc."
+LIN,Linde plc
+GILD,"Gilead Sciences, Inc."
+ARM,Arm Holdings plc
+SHOP,Shopify Inc.
+ADI,"Analog Devices, Inc."
+KLAC,KLA Corporation
+PEP,"PepsiCo, Inc."
+QCOM,QUALCOMM Incorporated
+TMUS,"T-Mobile US, Inc."
+ISRG,"Intuitive Surgical, Inc."
+MRVL,"Marvell Technology, Inc."
+SNDK,Sandisk Corporation
+VRTX,Vertex Pharmaceuticals Incorporated
+STX,Seagate Technology Holdings plc
+IBKR,"Interactive Brokers Group, Inc."
+WDC,Western Digital Corporation
+SBUX,Starbucks Corporation
+ADP,"Automatic Data Processing, Inc."
+PDD,PDD Holdings Inc.
+BKNG,Booking Holdings Inc.
+CME,CME Group Inc.
+SNY,Sanofi
+MAR,"Marriott International, Inc."
+ABNB,"Airbnb, Inc."
+REGN,"Regeneron Pharmaceuticals, Inc."
+EQIX,"Equinix, Inc."
+ADBE,Adobe Inc.
+CSX,CSX Corporation
+INTU,Intuit Inc.
+MNST,Monster Beverage Corporation
+FTNT,"Fortinet, Inc."
+CEG,Constellation Energy Corporation
+CDNS,"Cadence Design Systems, Inc."
+SNPS,"Synopsys, Inc."
+CTAS,Cintas Corporation
+MRNA,"Moderna, Inc."
+MELI,"MercadoLibre, Inc."
+CMCSA,Comcast Corporation
+MDLZ,"Mondelez International, Inc."
+DASH,"DoorDash, Inc."
+DDOG,"Datadog, Inc."
+APP,AppLovin Corporation
+HOOD,"Robinhood Markets, Inc."
+ROST,"Ross Stores, Inc."
+NTES,"NetEase, Inc."
+ORLY,"O'Reilly Automotive, Inc."
+AEP,"American Electric Power Company, Inc."
+HON,Honeywell International Inc.
+NXPI,NXP Semiconductors N.V.
+LITE,Lumentum Holdings Inc.
+NDAQ,"Nasdaq, Inc."
+MPWR,"Monolithic Power Systems, Inc."
+FAST,Fastenal Company
+FANG,"Diamondback Energy, Inc."
+MSTR,Strategy Inc
+ARGX,argenx SE
+NTRA,"Natera, Inc."
+PCAR,PACCAR Inc
+ADSK,"Autodesk, Inc."
+EBAY,eBay Inc.
+TRI,Thomson Reuters Corporation
+IDXX,"IDEXX Laboratories, Inc."
+BKR,Baker Hughes Company
+XEL,Xcel Energy Inc.
+CCEP,Coca-Cola Europacific Partners PLC
+KDP,Keurig Dr Pepper Inc.
+HONA,Honeywell Aerospace Inc.
+PYPL,"PayPal Holdings, Inc."
+EXC,Exelon Corporation
+WDAY,"Workday, Inc."
+ROP,"Roper Technologies, Inc."
+TEAM,Atlassian Corporation
+MDLN,Medline Inc.
+MCHP,Microchip Technology Incorporated
+PAYX,"Paychex, Inc."
+ONC,BeOne Medicines AG
+FER,Ferrovial N.V.
+TER,"Teradyne, Inc."
+RVMD,"Revolution Medicines, Inc."
+ALAB,"Astera Labs, Inc."
+RPRX,Royalty Pharma plc
+NBIS,Nebius Group N.V.
+BIIB,Biogen Inc.
+ODFL,"Old Dominion Freight Line, Inc."
+COIN,"Coinbase Global, Inc."
+ZS,"Zscaler, Inc."
+NTAP,"NetApp, Inc."
+VOD,Vodafone Group Public Limited Company
+KMB,Kimberly-Clark Corporation
+GEHC,GE HealthCare Technologies Inc.
+TTWO,"Take-Two Interactive Software, Inc."
+ERIC,Telefonaktiebolaget LM Ericsson (publ)
+EXPE,"Expedia Group, Inc."
+STLD,"Steel Dynamics, Inc."
+ACGL,Arch Capital Group Ltd.
+JD,"JD.com, Inc."
+UAL,"United Airlines Holdings, Inc."
+ESLT,Elbit Systems Ltd.
+AXON,"Axon Enterprise, Inc."
+ILMN,"Illumina, Inc."
+GMAB,Genmab A/S
+RKLB,Rocket Lab Corporation
+OKTA,"Okta, Inc."
+HBAN,Huntington Bancshares Incorporated
+DXCM,"DexCom, Inc."
+FLEX,Flex Ltd.
+NTRS,Northern Trust Corporation
+WTW,Willis Towers Watson Public Limited Company
+BSP,Bending Spoons S.p.A.
+CPRT,"Copart, Inc."
+CTSH,Cognizant Technology Solutions Corporation
+RYAAY,Ryanair Holdings plc
+ECHO,EchoStar Corporation
+CINF,Cincinnati Financial Corporation
+VRSN,"VeriSign, Inc."
+CRWV,"CoreWeave, Inc."
+FISV,"Fiserv, Inc."
+ON,ON Semiconductor Corporation
+ULTA,"Ulta Beauty, Inc."
+ZM,"Zoom Communications, Inc."
+TW,Tradeweb Markets Inc.
+MDB,"MongoDB, Inc."
+FOXA,Fox Corporation
+CRDO,Credo Technology Group Holding Ltd
+FCNCA,"First Citizens BancShares, Inc."

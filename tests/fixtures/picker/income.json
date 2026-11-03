@@ -1,0 +1,39 @@
+{
+  "base_currency": "AUD",
+  "investor": {
+    "experience": "experienced",
+    "drawdown_reaction": "hold",
+    "markets": ["ASX"],
+    "home_bias": "mostly_australian",
+    "direct_shares": "mix",
+    "income_growth": "income",
+    "exclusions": ["gambling", "fossil_fuels"],
+    "notes": "Retired. I want reliable, fully franked dividends. No mining companies."
+  },
+  "goals": [
+    {
+      "name": "Income",
+      "description": "Dividends to live on",
+      "risk_level": "medium",
+      "prefs": {"horizon_years": 15, "flexibility": "flexible"}
+    },
+    {
+      "name": "Speculative",
+      "description": "A small punt on AI",
+      "risk_level": "high",
+      "prefs": {"horizon_years": 8, "style": "speculative", "themes": ["ai"],
+                "flexibility": "nice_to_have"}
+    }
+  ],
+  "holdings": [
+    {"ticker": "CBA", "exchange": "ASX", "units": "100", "buy_price": "110",
+     "buy_date": "2023-05-02", "goal": "Income"},
+    {"ticker": "TLS", "exchange": "ASX", "units": "2000", "buy_price": "3.9",
+     "buy_date": "2023-05-02", "goal": "Income"},
+    {"ticker": "WHC", "exchange": "ASX", "units": "500", "buy_price": "7.5",
+     "buy_date": "2024-01-12", "goal": "Income"}
+  ],
+  "watchlist": [
+    {"ticker": "WOW", "exchange": "ASX", "goal": "Income"}
+  ]
+}

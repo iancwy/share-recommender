@@ -6,9 +6,30 @@ from enum import StrEnum
 from typing import Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from share_recommender.core.exchanges import EXCHANGES
+from share_recommender.core.universe import Kind
+
+
+def clean_ticker(v: str) -> str:
+    """Upper case, no surrounding spaces, not blank. Shared by every model with a ticker."""
+    v = v.strip().upper()
+    if not v:
+        raise ValueError("Ticker cannot be blank")
+    return v
+
+
+def known_exchange(v: str) -> str:
+    """One of the exchanges in core.exchanges, upper case."""
+    v = v.strip().upper()
+    if v not in EXCHANGES:
+        raise ValueError(f"Unknown exchange '{v}'. Known: {', '.join(EXCHANGES)}")
+    return v
+
+
+def blank_is_none(v: str | None) -> str | None:
+    return v.strip() or None if v is not None else None
 
 
 class RiskLevel(StrEnum):
@@ -61,21 +82,9 @@ class HoldingIn(BaseModel):
     category_id: UUID | None = None
     notes: str | None = None
 
-    @field_validator("ticker")
-    @classmethod
-    def _normalise_ticker(cls, v: str) -> str:
-        v = v.strip().upper()
-        if not v:
-            raise ValueError("Ticker cannot be blank")
-        return v
-
-    @field_validator("exchange")
-    @classmethod
-    def _known_exchange(cls, v: str) -> str:
-        v = v.strip().upper()
-        if v not in EXCHANGES:
-            raise ValueError(f"Unknown exchange '{v}'. Known: {', '.join(EXCHANGES)}")
-        return v
+    _ticker = field_validator("ticker")(lambda v: clean_ticker(v))
+    _exchange = field_validator("exchange")(lambda v: known_exchange(v))
+    _platform = field_validator("platform")(lambda v: blank_is_none(v))
 
     @field_validator("buy_date")
     @classmethod
@@ -83,11 +92,6 @@ class HoldingIn(BaseModel):
         if v > date.today():
             raise ValueError("Buy date cannot be in the future")
         return v
-
-    @field_validator("platform")
-    @classmethod
-    def _blank_platform_is_none(cls, v: str | None) -> str | None:
-        return v.strip() or None if v is not None else None
 
     @property
     def cost_base(self) -> Decimal:
@@ -185,26 +189,9 @@ class DividendIn(BaseModel):
     platform: str | None = Field(default=None, max_length=50)
     notes: str | None = None
 
-    @field_validator("ticker")
-    @classmethod
-    def _normalise_ticker(cls, v: str) -> str:
-        v = v.strip().upper()
-        if not v:
-            raise ValueError("Ticker cannot be blank")
-        return v
-
-    @field_validator("exchange")
-    @classmethod
-    def _known_exchange(cls, v: str) -> str:
-        v = v.strip().upper()
-        if v not in EXCHANGES:
-            raise ValueError(f"Unknown exchange '{v}'. Known: {', '.join(EXCHANGES)}")
-        return v
-
-    @field_validator("platform", "notes")
-    @classmethod
-    def _blank_is_none(cls, v: str | None) -> str | None:
-        return v.strip() or None if v is not None else None
+    _ticker = field_validator("ticker")(lambda v: clean_ticker(v))
+    _exchange = field_validator("exchange")(lambda v: known_exchange(v))
+    _blanks = field_validator("platform", "notes")(lambda v: blank_is_none(v))
 
     @field_validator("pay_date")
     @classmethod
@@ -237,6 +224,48 @@ class Dividend(DividendIn):
         return v
 
 
+class WatchlistItemIn(BaseModel):
+    """A share or ETF someone tracks without owning it."""
+
+    ticker: str = Field(min_length=1, max_length=20)
+    exchange: str
+    category_id: UUID | None = Field(default=None, description="The goal it's watched for")
+    name: str | None = Field(default=None, max_length=200)
+    kind: Kind | None = None
+    added_price: Decimal | None = Field(default=None, gt=0, description="Price when added")
+    alert_below: Decimal | None = Field(default=None, gt=0, description="Tell me at or below")
+    alert_above: Decimal | None = Field(default=None, gt=0, description="Tell me at or above")
+    source: Literal["manual", "picker"] = "manual"
+    notes: str | None = Field(default=None, max_length=1000)
+
+    _ticker = field_validator("ticker")(lambda v: clean_ticker(v))
+    _exchange = field_validator("exchange")(lambda v: known_exchange(v))
+    _blanks = field_validator("name", "notes")(lambda v: blank_is_none(v))
+
+    @model_validator(mode="after")
+    def _alerts_in_order(self):
+        if self.alert_below and self.alert_above and self.alert_below >= self.alert_above:
+            raise ValueError("The 'falls to' alert must be below the 'rises to' alert")
+        return self
+
+    @property
+    def currency(self) -> str:
+        return EXCHANGES[self.exchange].currency
+
+    @property
+    def key(self) -> tuple[str, str]:
+        return (self.ticker, self.exchange)
+
+
+class WatchlistItem(WatchlistItemIn):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    user_id: UUID
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+
 FALLBACK_PLATFORM = "CMC Markets"
 
 
@@ -250,6 +279,8 @@ class ProfileIn(BaseModel):
     notify_email: bool = Field(default=True, description="Email new notifications")
     notify_frequency: Literal["off", "daily", "weekly"] = Field(
         default="weekly", description="Daily means weekdays; weekly means Mondays")
+    picker_frequency: Literal["off", "weekly"] = Field(
+        default="weekly", description="Run the AI picker automatically (weekly on Mondays)")
 
     @field_validator("display_name", "default_platform")
     @classmethod

@@ -25,6 +25,14 @@
    - `20261101000400_notifications.sql`: notification settings on `profiles`, the job's
      `recommendation_snapshots`, and the in-app `notifications` inbox (people can only read,
      mark read and delete their own). Then see [notifications-setup.md](notifications-setup.md).
+   Week 5 adds, in this order:
+   - `20261108000100_watchlist.sql`: shares and ETFs each person tracks without owning
+     (owner-only, like holdings).
+   - `20261108000200_fundamentals_cache.sql`: a shared cache of company and fund figures
+     (market data only, like the price cache).
+   - `20261108000300_ai_picks.sql`: the AI picker's runs and picks (owner-only; nobody
+     edits them once written), the `picker_frequency` setting on `profiles`, and two new
+     notification kinds.
 
    (If you prefer the Supabase CLI: `supabase link --project-ref <ref>` then `supabase db push`.)
 

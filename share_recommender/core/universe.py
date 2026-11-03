@@ -8,6 +8,7 @@ Shares are listed roughly largest first within each market; that order is used w
 fundamentals are available to rank them.
 """
 
+import re
 from dataclasses import dataclass, field
 from decimal import Decimal
 from enum import StrEnum
@@ -311,6 +312,64 @@ def classify(ticker: str, exchange: str) -> dict[AssetClass, Decimal]:
         return inst.mix
     return {AssetClass.AU_SHARES if exchange.upper() == "ASX" else AssetClass.GLOBAL_SHARES:
             Decimal(1)}
+
+
+# Yahoo industries for shares that aren't on the curated list (matched ignoring case, dashes
+# and spaces). Used by the AI picker's screen.
+EXCLUSION_INDUSTRIES: dict[str, Exclusion] = {
+    "Oil & Gas E&P": Exclusion.FOSSIL_FUELS,
+    "Oil & Gas Integrated": Exclusion.FOSSIL_FUELS,
+    "Oil & Gas Midstream": Exclusion.FOSSIL_FUELS,
+    "Oil & Gas Refining & Marketing": Exclusion.FOSSIL_FUELS,
+    "Oil & Gas Drilling": Exclusion.FOSSIL_FUELS,
+    "Oil & Gas Equipment & Services": Exclusion.FOSSIL_FUELS,
+    "Thermal Coal": Exclusion.FOSSIL_FUELS,
+    "Coking Coal": Exclusion.FOSSIL_FUELS,
+    "Tobacco": Exclusion.TOBACCO,
+    "Gambling": Exclusion.GAMBLING,
+    "Resorts & Casinos": Exclusion.GAMBLING,
+    "Aerospace & Defense": Exclusion.WEAPONS,
+    "Beverages - Brewers": Exclusion.ALCOHOL,
+    "Beverages - Wineries & Distilleries": Exclusion.ALCOHOL,
+}
+
+# Yahoo industries that belong to a speculative theme. Yahoo has no cybersecurity industry,
+# so that theme only uses the curated names.
+THEME_INDUSTRIES: dict[str, Theme] = {
+    "Semiconductors": Theme.AI,
+    "Semiconductor Equipment & Materials": Theme.AI,
+    "Biotechnology": Theme.BIOTECH,
+    "Solar": Theme.CLEAN_ENERGY,
+    "Utilities - Renewable": Theme.CLEAN_ENERGY,
+}
+
+
+def _industry_key(name: str | None) -> str:
+    return re.sub(r"[\s\-–—]+", " ", (name or "").lower()).strip()
+
+
+_EXCLUDED_BY_INDUSTRY = {_industry_key(k): v for k, v in EXCLUSION_INDUSTRIES.items()}
+_THEME_BY_INDUSTRY = {_industry_key(k): v for k, v in THEME_INDUSTRIES.items()}
+
+
+def industry_exclusion(industry: str | None) -> Exclusion | None:
+    return _EXCLUDED_BY_INDUSTRY.get(_industry_key(industry))
+
+
+def industry_theme(industry: str | None) -> Theme | None:
+    return _THEME_BY_INDUSTRY.get(_industry_key(industry))
+
+
+# A fund whose name or category mentions any of these holds bonds or other fixed income.
+BOND_WORDS = ("bond", "fixed income", "fixed interest", "treasury", "credit", "aggregate")
+
+
+def is_bond_fund(name: str | None, fund_category: str | None = None) -> bool:
+    """True for a bond or fixed-income fund. Only call it for funds: some companies have these
+    words in their names (Credit Corp, for example). The app tracks shares, ETFs and cash only.
+    """
+    text = f"{name or ''} {fund_category or ''}".lower()
+    return any(word in text for word in BOND_WORDS)
 
 
 def us_exchange(ticker: str) -> str:

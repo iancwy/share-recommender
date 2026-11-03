@@ -42,6 +42,7 @@ class JobSettings(BaseSettings):
     smtp_password: str = ""
     email_from: str = ""
     app_url: str = "http://localhost:8501"
+    anthropic_api_key: str = ""  # for the weekly AI picker; without it the picker is skipped
 
     @property
     def email_configured(self) -> bool:

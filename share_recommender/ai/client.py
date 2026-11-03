@@ -16,8 +16,9 @@ class AIUnavailable(RuntimeError):
     """Claude couldn't be used; the message is safe to show to the person."""
 
 
-def client() -> anthropic.Anthropic:
-    key = get_settings().anthropic_api_key
+def client(api_key: str | None = None) -> anthropic.Anthropic:
+    """``api_key`` lets the scheduled job pass its own; otherwise it comes from the settings."""
+    key = api_key or get_settings().anthropic_api_key
     try:
         # With no key in .env, the SDK falls back to ANTHROPIC_API_KEY or an `ant auth login`
         # profile.

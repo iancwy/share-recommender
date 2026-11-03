@@ -1,0 +1,41 @@
+{
+  "base_currency": "AUD",
+  "investor": {
+    "experience": "intermediate",
+    "drawdown_reaction": "hold",
+    "markets": ["ASX", "NYSE", "NASDAQ"],
+    "home_bias": "balanced",
+    "direct_shares": "some",
+    "income_growth": "balanced",
+    "exclusions": ["tobacco"],
+    "notes": "Long-term investor. Happy with mostly ETFs and a few quality companies."
+  },
+  "goals": [
+    {
+      "name": "Retirement",
+      "description": "Topping up super from outside",
+      "risk_level": "high",
+      "target_amount": "800000",
+      "prefs": {"horizon_years": 25, "flexibility": "flexible"}
+    },
+    {
+      "name": "House deposit",
+      "risk_level": "low",
+      "target_amount": "150000",
+      "target_date": "2031-06-30",
+      "prefs": {"flexibility": "must_meet", "notes": "Mostly ETFs please, nothing exciting."}
+    }
+  ],
+  "holdings": [
+    {"ticker": "VAS", "exchange": "ASX", "units": "200", "buy_price": "95",
+     "buy_date": "2024-03-01", "goal": "Retirement"},
+    {"ticker": "CSL", "exchange": "ASX", "units": "20", "buy_price": "280",
+     "buy_date": "2024-08-15", "goal": "Retirement"},
+    {"ticker": "MSFT", "exchange": "NASDAQ", "units": "10", "buy_price": "410",
+     "buy_date": "2025-02-10", "goal": "Retirement"}
+  ],
+  "watchlist": [
+    {"ticker": "WES", "exchange": "ASX"},
+    {"ticker": "NVDA", "exchange": "NASDAQ", "goal": "Retirement"}
+  ]
+}

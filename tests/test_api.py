@@ -150,3 +150,41 @@ def test_notifications_endpoints(client):
     me = client.put("/me", json={"notify_frequency": "daily", "notify_email": False}).json()
     assert (me["notify_frequency"], me["notify_email"]) == ("daily", False)
     assert client.put("/me", json={"notify_frequency": "hourly"}).status_code == 422
+
+
+def test_watchlist_endpoints(client):
+    added = client.post("/watchlist", json={"ticker": "vas", "exchange": "ASX"})
+    assert added.status_code == 201 and added.json()["added_price"] == "100"
+    assert client.post("/watchlist", json={"ticker": "VAS", "exchange": "ASX"}).status_code == 409
+    assert client.post("/watchlist", json={"ticker": "NOPE", "exchange": "ASX"}).status_code == 422
+    item_id = added.json()["id"]
+    updated = client.put(f"/watchlist/{item_id}", json={"ticker": "VAS", "exchange": "ASX",
+                                                        "alert_below": "90"})
+    assert updated.json()["alert_below"] == "90"
+    holding = {"ticker": "VAS", "exchange": "ASX", "units": "10", "buy_price": "100",
+               "buy_date": "2026-11-02"}
+    converted = client.post(f"/watchlist/{item_id}/convert", json=holding)
+    assert converted.status_code == 201 and converted.json()["units"] == "10"
+    assert client.get("/watchlist").json() == []
+    assert client.post(f"/watchlist/{item_id}/convert", json=holding).status_code == 404
+
+
+def test_picks_run_list_and_daily_limit(client):
+    from share_recommender.api.deps import get_ranker
+    from share_recommender.core.preferences import CategoryPreferences, InvestorPreferences
+    from tests.fakes import StubRanker
+
+    repo = app.dependency_overrides[get_repository]()
+    assert client.get("/picks").json() == {"run": None, "picks": []}
+    assert client.post("/picks/run").status_code == 422  # no interview answers yet
+
+    repo.preferences = InvestorPreferences(markets=["ASX"])
+    goal = next(iter(repo.categories.values()))
+    repo.category_preferences[goal.id] = CategoryPreferences(horizon_years=10)
+    app.dependency_overrides[get_ranker] = lambda: StubRanker()
+    body = client.post("/picks/run").json()
+    assert body["run"]["status"] == "ok" and body["reused"] is False
+    assert client.get("/picks").json()["run"]["id"] == body["run"]["id"]
+
+    repo.manual_runs_today = 5
+    assert client.post("/picks/run").status_code == 429
