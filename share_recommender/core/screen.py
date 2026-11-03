@@ -156,6 +156,8 @@ class ShortlistItem:
     metrics: dict
     source: str                    # "screen", "held", "watchlist" or "universe"
     filter_notes: list[str] = field(default_factory=list)
+    failed: list[str] = field(default_factory=list)  # names of the hard filters it failed
+    summary: str | None = None     # the provider's description, at most 300 characters
 
 
 @dataclass
@@ -411,7 +413,9 @@ def screen(goal: GoalScreenInput, pool: list[ScreenRow], inv: InvestorPreference
             key=row.key, name=row.name, kind="etf" if row.is_etf else "share",
             sector=_sector(row), industry=f.industry if f else None, score=score,
             factors=factors, metrics=metrics(row, base_currency, fx), source=source,
-            filter_notes=[reason for _, reason in failures.get(row.key, [])] + notes)
+            filter_notes=[reason for _, reason in failures.get(row.key, [])] + notes,
+            failed=[name for name, _ in failures.get(row.key, [])],
+            summary=(f.summary or "")[:300] or None if f else None)
 
     # Highest score first; ties broken by ticker so every run gives the same list.
     ranked = sorted(passing, key=lambda r: (-scored[r.key][0], r.key))
