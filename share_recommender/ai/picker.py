@@ -68,7 +68,10 @@ def rank(payload: dict, api_key: str | None = None) -> Ranked:
             **FALLBACK,
         )
     usage = getattr(response, "usage", None)
-    tokens_in = getattr(usage, "input_tokens", None)
+    # With prompt caching most of the input is counted as cache writes or reads.
+    parts = [getattr(usage, name, None) for name in (
+        "input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens")]
+    tokens_in = sum(p for p in parts if isinstance(p, int)) if parts[0] is not None else None
     tokens_out = getattr(usage, "output_tokens", None)
     log.info("AI picker: %s input tokens, %s output tokens", tokens_in, tokens_out)
     if response.stop_reason == "refusal" or response.parsed_output is None:

@@ -85,7 +85,8 @@ class Momentum:
 
 
 def momentum(bars: list[PriceBar], today: date) -> Momentum | None:
-    bars = sorted((b for b in bars if b.close and b.close > 0), key=lambda b: b.day)
+    bars = sorted((b for b in bars if b.close is not None and b.close.is_finite() and b.close > 0),
+                  key=lambda b: b.day)
     if len(bars) < 2:
         return None
     last = bars[-1].close

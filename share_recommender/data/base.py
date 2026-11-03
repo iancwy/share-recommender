@@ -136,3 +136,14 @@ class MarketDataProvider(ABC):
     def get_many_fundamentals(self, symbols: list[tuple[str, str]]
                               ) -> dict[tuple[str, str], Fundamentals | None]:
         return {s: self.get_fundamentals(*s) for s in symbols}
+
+    def get_many_history(self, symbols: list[tuple[str, str]], start: date, end: date
+                         ) -> dict[tuple[str, str], list[PriceBar]]:
+        """Daily closes for several symbols; a symbol that fails gets an empty list."""
+        out = {}
+        for s in symbols:
+            try:
+                out[s] = self.get_history(*s, start, end)
+            except Exception:
+                out[s] = []
+        return out

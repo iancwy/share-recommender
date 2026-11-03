@@ -8,9 +8,10 @@ or watchlist item Claude left out.
 """
 
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal
 from typing import Literal
+from uuid import UUID
 
 from pydantic import BaseModel, Field
 
@@ -256,3 +257,49 @@ def summaries(output: PickerOutput, goals: list[PickerGoal]) -> dict[str, str]:
     """Claude's summary per goal, keyed by category id."""
     ids = {g.key: str(g.category.id) for g in goals}
     return {ids[gp.goal]: gp.summary for gp in output.goals if gp.goal in ids}
+
+
+# Saved runs ------------------------------------------------------------------------------
+
+class PickRun(BaseModel):
+    """One run of the picker: what was screened, Claude's token use and per-goal summaries."""
+
+    id: UUID | None = None
+    trigger: Literal["manual", "scheduled"]
+    status: Literal["ok", "failed"] = "ok"
+    model: str | None = None
+    input_hash: str | None = None
+    pool_size: int = 0
+    shortlisted: int = 0
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    # {"goals": {category id: {"name", "summary", "counts"}}, "warnings": [...],
+    #  "skipped": [...]}
+    summary: dict = Field(default_factory=dict)
+    error: str | None = None
+    created_at: datetime | None = None
+
+    def record(self) -> dict:
+        """The columns to insert (the database fills id, user_id and created_at)."""
+        return self.model_dump(mode="json", exclude={"id", "created_at"})
+
+
+def pick_record(row: PickRow, run_id: str) -> dict:
+    return {"run_id": run_id, "category_id": row.goal_id or None, "ticker": row.ticker,
+            "exchange": row.exchange, "name": row.name, "kind": row.kind,
+            "action": row.action, "conviction": row.conviction, "rank": row.rank,
+            "score": row.score,
+            "suggested_weight": str(row.suggested_weight)
+            if row.suggested_weight is not None else None,
+            "rationale": row.rationale, "risks": row.risks, "metrics": row.metrics,
+            "source": row.source}
+
+
+def pick_from_record(r: dict) -> PickRow:
+    weight = r.get("suggested_weight")
+    score = r.get("score")
+    return PickRow(str(r["category_id"]) if r.get("category_id") else "", r["ticker"],
+                   r["exchange"], r.get("name"), r.get("kind") or "share", r["action"],
+                   r["conviction"], int(r["rank"]), float(score) if score is not None else None,
+                   Decimal(str(weight)) if weight is not None else None, r["rationale"],
+                   r.get("risks"), r.get("metrics") or {}, r["source"])

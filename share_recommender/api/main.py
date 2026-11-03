@@ -15,7 +15,7 @@ from fastapi.responses import JSONResponse
 from postgrest.exceptions import APIError
 from pydantic import BaseModel
 
-from share_recommender.api.deps import MarketData, PriceStore, Repo
+from share_recommender.api.deps import MarketData, PriceStore, Ranker, Repo
 from share_recommender.core.exchanges import EXCHANGES
 from share_recommender.core.importer import detect, parse_rows, read_csv
 from share_recommender.core.models import (
@@ -35,7 +35,14 @@ from share_recommender.core.models import (
 from share_recommender.core.preferences import CategoryPreferences, InvestorPreferences
 from share_recommender.core.recommender import Recommendation
 from share_recommender.data import Quote
+from share_recommender.data.candidates import candidate_pool
 from share_recommender.data.history import CachedHistory
+from share_recommender.picker_service import (
+    DAILY_LIMIT,
+    KEEP_RUNS,
+    PickerNotReady,
+    run_picker,
+)
 from share_recommender.portfolio_service import health_report, portfolio_history
 from share_recommender.recommendations import build_recommendation, provider_fns
 from share_recommender.watchlist_service import prepare_item
@@ -260,6 +267,52 @@ def convert_watchlist_item(item_id: UUID, body: HoldingIn, repo: Repo,
     if remove:
         repo.remove_from_watchlist(item_id)
     return holding
+
+
+# AI picker ------------------------------------------------------------------
+
+def _picks_response(run, picks) -> dict:
+    return {"run": run.model_dump(mode="json") if run else None,
+            "picks": [asdict(p) | {"suggested_weight": str(p.suggested_weight)
+                                   if p.suggested_weight is not None else None}
+                      for p in picks]}
+
+
+@app.get("/picks")
+def get_picks(repo: Repo) -> dict:
+    """The latest successful picker run and its picks (run is null before the first)."""
+    run = repo.latest_pick_run()
+    return _picks_response(run, repo.list_picks(run.id) if run else [])
+
+
+@app.post("/picks/run")
+def run_picks(repo: Repo, market: MarketData, rank: Ranker) -> dict:
+    """Run the picker now. At most a few runs a day per person (429 after that)."""
+    if repo.pick_runs_today() >= DAILY_LIMIT:
+        raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS,
+                            f"The picker can run {DAILY_LIMIT} times a day. Try tomorrow.")
+    quotes_fn, fx_fn, fundamentals_fn = provider_fns(market)
+    categories = repo.list_categories()
+    profile = repo.get_profile()
+    try:
+        result = run_picker(
+            categories=categories,
+            goal_prefs={c.id: repo.get_category_preferences(c.id) for c in categories},
+            holdings=repo.list_holdings(), cash_accounts=repo.list_cash_accounts(),
+            watchlist=repo.list_watchlist(), inv=repo.get_preferences(),
+            base=profile.base_currency if profile else "AUD", quotes_fn=quotes_fn,
+            fx_fn=fx_fn, fundamentals_fn=fundamentals_fn,
+            history_fn=lambda s, start, end: market.get_many_history(list(s), start, end),
+            pool_fn=lambda markets: candidate_pool(market, markets), rank_fn=rank,
+            today=date.today(), trigger="manual", latest=repo.latest_pick_run())
+    except PickerNotReady as exc:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc)) from exc
+    if result.reused:
+        return _picks_response(result.run, repo.list_picks(result.run.id)) | {"reused": True}
+    run_id = repo.save_pick_run(result.run, result.picks)
+    repo.prune_pick_runs(KEEP_RUNS)
+    run = result.run.model_copy(update={"id": UUID(str(run_id))})
+    return _picks_response(run, result.picks) | {"reused": False}
 
 
 # Cash accounts --------------------------------------------------------------

@@ -279,6 +279,8 @@ class ProfileIn(BaseModel):
     notify_email: bool = Field(default=True, description="Email new notifications")
     notify_frequency: Literal["off", "daily", "weekly"] = Field(
         default="weekly", description="Daily means weekdays; weekly means Mondays")
+    picker_frequency: Literal["off", "weekly"] = Field(
+        default="weekly", description="Run the AI picker automatically (weekly on Mondays)")
 
     @field_validator("display_name", "default_platform")
     @classmethod

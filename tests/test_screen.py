@@ -138,6 +138,8 @@ def test_momentum_from_price_bars():
     assert m.r12m > m.r6m > m.r3m > 0
     assert m.max_drawdown == 0 and m.volatility is not None
     assert momentum(bars[:1], TODAY) is None
+    gappy = bars + [PriceBar(TODAY - timedelta(days=500), D("NaN"))]
+    assert momentum(gappy, TODAY) == m  # missing closes are skipped
 
 
 # The shortlist --------------------------------------------------------------------------

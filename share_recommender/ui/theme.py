@@ -31,6 +31,14 @@ PALETTE = {
 }
 
 # Health check severities: always an icon and a label, never colour alone.
+# The AI picker's actions, in the same style.
+ACTION_BADGE = {
+    "buy": ":green[:material/add_circle:] Buy",
+    "hold": ":blue[:material/pan_tool:] Hold",
+    "review": ":orange[:material/rate_review:] Review",
+    "watch": ":violet[:material/visibility:] Watch",
+}
+
 SEVERITY_BADGE = {
     "alert": ":red[:material/report:] Alert",
     "warning": ":orange[:material/warning:] Warning",

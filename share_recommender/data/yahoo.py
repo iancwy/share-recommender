@@ -1,6 +1,7 @@
 """Yahoo Finance via the unofficial ``yfinance`` package. Free, no API key, global coverage."""
 
 import logging
+import math
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, date, timedelta
 from decimal import Decimal
@@ -82,6 +83,7 @@ class YahooFinanceProvider(MarketDataProvider):
         return [
             PriceBar(day=idx.date(), close=_decimal(Decimal(str(float(row["Close"]))) / divisor))
             for idx, row in hist.iterrows()
+            if math.isfinite(float(row["Close"]))  # Yahoo leaves gaps as NaN
         ]
 
     def get_fx_rate(self, base: str, quote: str) -> Decimal | None:
@@ -161,6 +163,18 @@ class YahooFinanceProvider(MarketDataProvider):
                               ) -> dict[tuple[str, str], Fundamentals | None]:
         with ThreadPoolExecutor(max_workers=_PARALLEL_REQUESTS) as pool:
             results = pool.map(lambda s: self.get_fundamentals(*s), symbols)
+        return dict(zip(symbols, results, strict=True))
+
+    def get_many_history(self, symbols: list[tuple[str, str]], start: date, end: date
+                         ) -> dict[tuple[str, str], list[PriceBar]]:
+        def one(s):
+            try:
+                return self.get_history(*s, start, end)
+            except Exception:
+                log.warning("No history for %s", s, exc_info=True)
+                return []
+        with ThreadPoolExecutor(max_workers=_PARALLEL_REQUESTS) as pool:
+            results = pool.map(one, symbols)
         return dict(zip(symbols, results, strict=True))
 
     def discover(self, exchange: str, limit: int = 150) -> list[Candidate]:

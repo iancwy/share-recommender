@@ -1,6 +1,6 @@
 """In-memory stand-ins for Supabase and the market data provider."""
 
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from types import SimpleNamespace
 from uuid import UUID, uuid4
@@ -19,6 +19,7 @@ from share_recommender.core.models import (
     WatchlistItem,
     WatchlistItemIn,
 )
+from share_recommender.core.picker import PickRow, PickRun
 from share_recommender.core.preferences import CategoryPreferences, InvestorPreferences
 from share_recommender.data.base import (
     Candidate,
@@ -44,6 +45,32 @@ class FakeRepository:
         self.category_preferences: dict[UUID, CategoryPreferences] = {}
         self.notifications: list[dict] = []
         self.snapshots: dict[str, dict] = {}
+        self.pick_runs: list[PickRun] = []         # oldest first
+        self.picks: dict[str, list[PickRow]] = {}  # run id -> picks
+        self.manual_runs_today = 0
+
+    def latest_pick_run(self, include_failed=False):
+        runs = [r for r in self.pick_runs if include_failed or r.status == "ok"]
+        return runs[-1] if runs else None
+
+    def list_picks(self, run_id):
+        return sorted(self.picks.get(str(run_id), []), key=lambda p: p.rank)
+
+    def save_pick_run(self, run, picks):
+        run = run.model_copy(update={"id": uuid4(), "created_at": datetime.now(UTC)})
+        self.pick_runs.append(run)
+        self.picks[str(run.id)] = list(picks)
+        if run.trigger == "manual":
+            self.manual_runs_today += 1
+        return str(run.id)
+
+    def pick_runs_today(self):
+        return self.manual_runs_today
+
+    def prune_pick_runs(self, keep=10):
+        for run in self.pick_runs[:-keep]:
+            self.picks.pop(str(run.id), None)
+        self.pick_runs = self.pick_runs[-keep:]
 
     def list_notifications(self, limit=50):
         return sorted(self.notifications, key=lambda n: n["created_at"], reverse=True)[:limit]
@@ -301,3 +328,45 @@ class FakeFundamentalsStore:
             raise RuntimeError("relation fundamentals_cache does not exist")
         self.saved.append(dict(items))
         self.items.update({k: (f, datetime.now(UTC)) for k, f in items.items()})
+
+
+def rising_history(symbols, start, end):
+    """A year and a bit of steadily rising daily closes for every symbol (for the picker)."""
+    days = (end - start).days
+    return {s: [PriceBar(start + timedelta(days=d), Decimal(50) + Decimal(d) / 10 + len(s[0]))
+                for d in range(days + 1)] for s in symbols}
+
+
+class StubRanker:
+    """Stands in for Claude: buys the top two of each shortlist, holds or watches the rest."""
+
+    def __init__(self, error: Exception | None = None):
+        self.error = error
+        self.payloads: list[dict] = []
+
+    def __call__(self, payload):
+        from share_recommender.ai.picker import Ranked
+        from share_recommender.core.picker import AIPick, GoalPicks, PickerOutput
+
+        self.payloads.append(payload)
+        if self.error:
+            raise self.error
+        goals = []
+        for g in payload["goals"]:
+            picks, buys = [], 0
+            for n, item in enumerate(g["shortlist"], start=1):
+                if item["source"] == "held":
+                    action = "hold"
+                elif buys < 2 and item["score"] is not None:
+                    action, buys = "buy", buys + 1
+                elif item["source"] == "watchlist":
+                    action = "watch"
+                else:
+                    continue
+                picks.append(AIPick(ticker=item["ticker"], exchange=item["exchange"],
+                                    action=action, conviction="high", rank=n,
+                                    rationale=f"{item['ticker']} scores well.",
+                                    risks="Prices fall."))
+            goals.append(GoalPicks(goal=g["goal"], summary=f"Picks for {g['name']}.",
+                                   picks=picks))
+        return Ranked(PickerOutput(goals=goals), "claude-opus-5-5", 5000, 1500)
