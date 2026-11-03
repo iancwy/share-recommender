@@ -1074,8 +1074,18 @@ def _picker_history(symbols: tuple[tuple[str, str], ...], start: date, end: date
     return get_provider().get_many_history(list(symbols), start, end)
 
 
+def _sydney(ts):
+    """A database timestamp in Sydney time (the server runs on UTC)."""
+    try:
+        from zoneinfo import ZoneInfo
+
+        return pd.Timestamp(ts).tz_convert(ZoneInfo("Australia/Sydney"))
+    except Exception:  # no time zone database: show it in the server's zone
+        return pd.Timestamp(ts).tz_convert(None)
+
+
 def _run_label(run: PickRun) -> str:
-    when = run.created_at.astimezone() if run.created_at else None
+    when = _sydney(run.created_at) if run.created_at else None
     text = when.strftime("%a %d/%m/%Y, ") + when.strftime("%I:%M%p").lstrip("0").lower() \
         if when else "just now"
     return f"Last run {text}, {'weekly' if run.trigger == 'scheduled' else 'on demand'}"
@@ -1768,7 +1778,7 @@ def _notifications_page(repo: PortfolioRepository) -> None:
     for n in items:
         goal = names.get(str(n.get("category_id")), "Portfolio") if n.get("category_id") \
             else "Portfolio"
-        when = pd.Timestamp(n["created_at"]).tz_convert(None)
+        when = _sydney(n["created_at"])
         with st.container(border=True):
             new = "" if n.get("read_at") else "🔵 **New** · "
             st.markdown(f"{new}**{goal}: {n['title']}**")
