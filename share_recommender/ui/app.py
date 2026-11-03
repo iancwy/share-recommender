@@ -62,7 +62,7 @@ from share_recommender.data.fundamentals_cache import CachedFundamentals
 from share_recommender.data.history import CachedHistory
 from share_recommender.db.fundamentals_store import SupabaseFundamentalsStore
 from share_recommender.db.price_store import SupabasePriceStore
-from share_recommender.db.repository import PortfolioRepository
+from share_recommender.db.repository import PortfolioRepository, sydney_midnight
 from share_recommender.db.supabase_client import SupabaseNotConfigured, anon_client
 from share_recommender.notifier import build_notifications
 from share_recommender.picker_service import (
@@ -498,15 +498,20 @@ def _watch_form(key: str, categories: list[Category], existing: WatchlistItem | 
             index=cat_ids.index(existing.category_id) if existing and existing.category_id
             in cat_ids else 0, key=f"{key}_goal")
         c3, c4 = st.columns(2)
+        # Blank means no alert, so there's no default; the placeholder says so on a phone,
+        # where the help icon is easy to miss.
         below = c3.number_input("Alert me if it falls to", min_value=0.0, step=0.01,
-                                format="%.2f", key=f"{key}_below",
+                                format="%.2f", key=f"{key}_below", placeholder="No alert",
                                 value=float(existing.alert_below) if existing and
                                 existing.alert_below else None,
-                                help="In the exchange's currency. Leave blank for no alert.")
+                                help="A price in the exchange's currency. Leave blank for no "
+                                     "alert.")
         above = c4.number_input("Alert me if it rises to", min_value=0.0, step=0.01,
-                                format="%.2f", key=f"{key}_above",
+                                format="%.2f", key=f"{key}_above", placeholder="No alert",
                                 value=float(existing.alert_above) if existing and
-                                existing.alert_above else None)
+                                existing.alert_above else None,
+                                help="A price in the exchange's currency. Leave blank for no "
+                                     "alert.")
         notes = st.text_input("Notes", value=(existing.notes or "") if existing else "",
                               key=f"{key}_notes")
         submitted = st.form_submit_button("Save changes" if existing else "Add to watchlist",
@@ -599,6 +604,9 @@ def _watchlist_page(repo: PortfolioRepository) -> None:
     action = st.radio("What would you like to do?", ["Edit", "Remove", "Convert to holding"],
                       horizontal=True, key=f"watch_action_{selected.id}")
     if action == "Edit":
+        now = next((r.price for r in rows if r.item.id == selected.id), None)
+        if now is not None:
+            st.caption(f"{selected.ticker} is {now:,.2f} {selected.currency} now.")
         updated = _watch_form(f"edit_watch_{selected.id}", categories, existing=selected)
         if updated:
             repo.update_watchlist_item(selected.id, updated)
@@ -1075,7 +1083,8 @@ def _picker_history(symbols: tuple[tuple[str, str], ...], start: date, end: date
 
 
 def _run_label(run: PickRun) -> str:
-    when = run.created_at.astimezone() if run.created_at else None
+    # The server runs in UTC; show the time where the family is (as the daily limit does).
+    when = run.created_at.astimezone(sydney_midnight().tzinfo) if run.created_at else None
     text = when.strftime("%a %d/%m/%Y, ") + when.strftime("%I:%M%p").lstrip("0").lower() \
         if when else "just now"
     return f"Last run {text}, {'weekly' if run.trigger == 'scheduled' else 'on demand'}"
