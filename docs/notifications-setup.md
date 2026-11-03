@@ -44,6 +44,7 @@ repository secret**:
 | `SMTP_PASSWORD` | The app password from step 2 |
 | `EMAIL_FROM` | e.g. `Share Recommender <you@gmail.com>` |
 | `APP_URL` | The app's address, e.g. `https://ian-shares.streamlit.app` (see docs/deploy.md) |
+| `ANTHROPIC_API_KEY` | For the weekly AI picker: console.anthropic.com > API Keys. Without it the job skips the picker and sends everything else |
 
 **The service key bypasses row-level security.** Only the job uses it: it reads through
 `db/admin.py`, where every query filters by person (tests check each one), and its settings
@@ -64,6 +65,12 @@ python -m share_recommender.jobs.notify --dry-run --user you@example.com --force
 ```
 
 `--force` runs weekly people on any day; anyone set to Off is always skipped.
+
+On Mondays (or with `--force`) the job first runs the **AI picker** for everyone whose
+"Run the AI picker automatically" is Weekly (Profile page), so new buy ideas go into that
+day's notifications. With `--dry-run` it prints the picks and saves nothing; `--no-picker`
+skips it. Each run is one Claude call per person: check usage in the Anthropic Console after
+the first few weeks.
 
 In the app, **Notifications > Check for changes now** shows what the next notification would
 say, without saving or emailing.

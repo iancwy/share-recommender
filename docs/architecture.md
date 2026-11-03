@@ -202,8 +202,61 @@ never changes the numbers.
   every rerun. Settings come from Cloud secrets as environment variables. See
   [deploy.md](deploy.md).
 
+## Watchlist and the AI stock picker (Week 5)
+
+- **Watchlist** (`watchlist` table, owner-only like holdings): shares and ETFs a person
+  tracks without owning, optionally for one goal, with a price when added and optional
+  alerts below and above. `watchlist_service.prepare_item` looks the ticker up first and
+  refuses bond funds; `core/watchlist.py` works out the page's figures. "Convert to holding"
+  opens the add-holding form filled in from the item.
+- **The picker's data flow** (`picker_service.run_picker`):
+
+  ```
+  candidate pool (data/candidates.py: Yahoo's screener per exchange, or the seed list, plus the
+    curated shares and ETFs, the watchlist and what's held)
+   -> cheap first pass (markets, avoid list, ETF-only, size)
+   -> fundamentals (shared week-long cache) and ~400 days of prices (momentum)
+   -> per goal: hard filters with reasons, six factor scores, top 15 with at most 3 per
+      sector, plus held shares and watchlist items (core/screen.py)
+   -> one Claude call for all goals (ai/picker.py)
+   -> checks on the answer (core/picker.py)
+   -> saved run and picks (pick_runs, ai_picks)
+   -> notifications (new buy ideas, hold to review) and the email
+  ```
+
+- **Why Claude only ranks a rules-made shortlist.** The screen decides what's eligible:
+  markets, exclusions, no bonds, size and trading, a year of history, themes for speculative
+  goals. Claude sees a few dozen names per goal with the figures that matter, and judges fit
+  against the person's answers and notes, which rules can't read. Its answer is then checked:
+  anything not on that goal's shortlist, or ruled out by an exclusion, bond or ETF-only
+  filter, is dropped; hold and review are only for held shares and watch only for watchlist
+  items; at most five buys per goal; suggested weights are scaled to the goal's room for
+  individual shares; anything held or watched that Claude left out is filled in. Each change
+  becomes a warning shown on the page. Provider text (names, the 300-character summary) is
+  marked as data in the prompt. The payload has no database ids or email addresses.
+- **Runs** are a record: the app (with the person's own token) or the job (service key)
+  inserts them, nobody updates them, and the newest 10 are kept. A run whose inputs hash the
+  same as one in the last 24 hours reuses it instead of calling Claude. A Claude or data
+  failure is saved as a failed run with its message, and the page shows the screen's top 5
+  unranked. Five on-demand runs a day per person.
+- **Tables**: `watchlist`, `fundamentals_cache` (shared market data, like the price cache),
+  `pick_runs` and `ai_picks` (owner-only, insert and delete but no update), and
+  `profiles.picker_frequency` (off or weekly; weekly by default).
+- **Shared fundamentals cache** (`data/fundamentals_cache.py`, `db/fundamentals_store.py`):
+  company and fund figures from Yahoo kept for a week, shared by everyone because they're
+  market data. A stale copy is kept if a refresh fails; if the table is missing, it falls back
+  to the provider.
+- **Weekly picker**: the notifications job runs the picker on Mondays (Sydney time) for
+  people set to weekly, before their notifications, so new picks go into that day's diff.
+  Goal snapshots store the high and medium conviction picks; a snapshot from before the
+  picker is a baseline for them. Watchlist alerts fire once per level and are remembered in
+  the portfolio snapshot's `sent` list, like price moves.
+
 ## Possible later work
 
 - Selling: reduce parcels and record capital gains, including sales from broker exports.
 - Dividend import from broker statements.
 - Remembering the sign-in on the phone between visits.
+- Feeding AI picks into the buy plan (today they sit alongside the rules recommendation).
+- A prompt-tuning workflow for the picker, starting from the sample profiles in
+  `tests/fixtures/picker/`.

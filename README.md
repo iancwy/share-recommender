@@ -21,6 +21,13 @@ Ian's private share and ETF recommender and portfolio dashboard.
   about new or changed recommendations, in the app and by email, on each person's chosen
   schedule (a GitHub Actions job); a phone-friendly layout; and deployment to Streamlit
   Community Cloud ([docs/deploy.md](docs/deploy.md)).
+- Week 5: a **watchlist** (shares and ETFs you track without owning, with price alerts and
+  a one-step "convert to holding"), and an **AI stock picker**: a rules screen of the largest
+  shares on your exchanges plus the curated ETFs, your watchlist and what you hold, scored on
+  momentum, quality, value, income, growth and stability, then ranked by Claude against your
+  answers and goals, checked, and saved. It runs on demand from the Picker page (5 a day) and
+  weekly on Mondays from the notifications job, which also sends new buy ideas and watchlist
+  alerts.
 
 ## Run it locally (VS Code)
 
@@ -45,7 +52,7 @@ Needs Python 3.11 or newer.
    | `SUPABASE_URL`, `SUPABASE_ANON_KEY` | Required: your Supabase project (the anon / publishable key, never the secret one) |
    | `MARKET_DATA_PROVIDER` | `yahoo` (the only one so far) |
    | `DEFAULT_EXCHANGE` | Preselected exchange for new holdings, e.g. `ASX` |
-   | `ANTHROPIC_API_KEY` | Optional: the chat interview and plain-English explanations |
+   | `ANTHROPIC_API_KEY` | Needed for the Picker page (Claude ranks the shortlist), the chat interview and plain-English explanations. Without it the rest of the app works and the Picker shows the screen's results unranked |
 
 4. **Run the app:**
 
@@ -70,6 +77,18 @@ python -m share_recommender.jobs.notify --dry-run                 # prints, save
 python -m share_recommender.jobs.notify --dry-run --user you@example.com --force
 ```
 
+## Trying the AI picker without the app
+
+`scripts/picker_dry_run.py` runs the whole picker for a sample profile against live market
+data and Claude, with no database, and prints each goal's shortlist and the picks:
+
+```bash
+python scripts/picker_dry_run.py --profile tests/fixtures/picker/balanced.json
+python scripts/picker_dry_run.py --profile tests/fixtures/picker/income.json --screen-only
+```
+
+`--screen-only` stops before Claude (no API key needed). A run takes one to two minutes.
+
 ## Tests
 
 ```bash
@@ -84,10 +103,14 @@ GitHub Actions runs both on every push and pull request (`.github/workflows/ci.y
 ```
 share_recommender/
   core/       models, exchanges, valuation, interview answers, curated investment list,
-              recommender, health check, notifications (pure Python, no network)
-  data/       market data providers (Yahoo Finance first, pluggable) and the price cache
-  ai/         optional chat interview and plain-English explanations from Claude
+              recommender, health check, notifications, watchlist, the picker's rules
+              screen and checks (pure Python, no network)
+  data/       market data providers (Yahoo Finance first, pluggable), discovery and seed
+              lists, and the price and fundamentals caches
+  ai/         chat interview, plain-English explanations and the picker's ranking (Claude)
   recommendations.py   fetches prices, FX and dividend data, then runs the recommender
+  picker_service.py    runs the AI picker: pool, screen, Claude, checks
+  watchlist_service.py looks up a ticker before it goes on the watchlist
   portfolio_service.py gathers data for the dashboard and health check
   notifier.py          works out what's new for a person's notifications
   jobs/       the scheduled notification job (python -m share_recommender.jobs.notify)
@@ -97,6 +120,7 @@ share_recommender/
   api/        FastAPI app for a future web / mobile front end
   ui/         Streamlit app
 streamlit_app.py       entry point for Streamlit Community Cloud
+scripts/               picker dry run, seed-list refresh
 supabase/migrations/   database schema, run oldest first
 docs/                  architecture, setup, notifications, deploy, data providers, design
 tests/
