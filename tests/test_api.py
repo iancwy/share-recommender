@@ -188,3 +188,30 @@ def test_picks_run_list_and_daily_limit(client):
 
     repo.manual_runs_today = 5
     assert client.post("/picks/run").status_code == 429
+
+
+def test_contributions_and_projections(client):
+    from decimal import Decimal
+
+    repo = app.dependency_overrides[get_repository]()
+    goal = next(iter(repo.categories.values()))
+    created = client.post("/contributions", json={"amount": "500", "frequency": "fortnightly",
+                                                  "category_id": str(goal.id)})
+    assert created.status_code == 201
+    cid = created.json()["id"]
+    updated = client.put(f"/contributions/{cid}", json={  # a full replacement
+        "amount": "600", "frequency": "fortnightly", "category_id": str(goal.id)})
+    assert updated.json()["amount"] == "600"
+    assert client.post("/contributions", json={"amount": "0"}).status_code == 422
+    assert len(client.get("/contributions").json()) == 1
+
+    body = client.get("/projections", params={"scope": "goal", "category_id": str(goal.id),
+                                              "years": 2}).json()
+    assert len(body["points"]) == 25 and "illustrations" in body["disclaimer"]
+    assert Decimal(body["contributed"]) == Decimal(600 * 26 * 2)
+    assert client.get("/projections", params={"years": 41}).status_code == 422
+    assert client.get("/projections", params={"scope": "goal"}).status_code == 422
+    share = client.get("/projections", params={"scope": "share", "ticker": "nvda",
+                                               "exchange": "NASDAQ", "amount": 1000}).json()
+    assert Decimal(share["start_value"]) == Decimal(1000)
+    assert client.delete(f"/contributions/{cid}").status_code == 204

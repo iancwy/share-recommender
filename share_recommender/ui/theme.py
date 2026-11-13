@@ -20,11 +20,13 @@ ICON = str(Path(__file__).with_name("icon.svg"))
 # Chart colours, light and dark steps. "series" is Value then Money invested; the
 # categorical list matches chartCategoricalColors in config.toml.
 PALETTE = {
-    "light": {"series": ["#1F6F78", "#8A99A3"], "muted": "#66737A", "grid": "#E7E3DA",
+    "light": {"series": ["#1F6F78", "#8A99A3"], "band": "#1F6F78", "muted": "#66737A",
+              "grid": "#E7E3DA",
               "positive": "#1A7A4C", "negative": "#B4432A",
               "categorical": ["#1F6F78", "#D08A2E", "#5B6CB8", "#7A9E4F", "#A2557F",
                               "#8A99A3"]},
-    "dark": {"series": ["#5DB8B3", "#A7B4BB"], "muted": "#92A1A6", "grid": "#253034",
+    "dark": {"series": ["#5DB8B3", "#A7B4BB"], "band": "#5DB8B3", "muted": "#92A1A6",
+             "grid": "#253034",
              "positive": "#5DCB92", "negative": "#F28C70",
              "categorical": ["#5DB8B3", "#E9A852", "#909EE8", "#A6C879", "#D78BB5",
                              "#A7B4BB"]},

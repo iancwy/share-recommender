@@ -712,7 +712,7 @@ def test_contributions_add_edit_pause_delete(run_app, repo):
     _button(at, "Add contribution").click().run()
     into_saver = next(x for x in repo.contributions.values() if x.cash_account_id)
     assert into_saver.category_id == goal.id
-    table = at.dataframe[0].value
+    table = next(d.value for d in at.dataframe if "Amount" in d.value.columns)
     assert "A$500 a fortnight, about A$1,083 a month" in list(table["Amount"])
     assert "ING Saver (General investing)" in list(table["Into"])
 
@@ -732,3 +732,97 @@ def test_contributions_add_edit_pause_delete(run_app, repo):
     at.checkbox(key=f"confirm_contribution_{c.id}").check().run()
     at.button(key=f"delete_contribution_{c.id}").click().run()
     assert c.id not in repo.contributions and not at.exception
+
+
+# Projections page ------------------------------------------------------------------------
+
+def _hold(repo, ticker="VAS", units="100", category=None):
+    from datetime import date as _date
+
+    return repo.create_holding(HoldingIn(ticker=ticker, exchange="ASX", units=Decimal(units),
+                                         buy_price=Decimal(90), buy_date=_date(2025, 1, 2),
+                                         category_id=category.id if category else None))
+
+
+def _texts(at):
+    return " ".join([m.value for m in at.markdown] + [c.value for c in at.caption])
+
+
+def test_projections_empty_state(run_app):
+    at = run_app()
+    _go(at, "Projections").run()
+    assert not at.exception
+    assert any("Add holdings, savings or a regular contribution" in i.value for i in at.info)
+
+
+def test_projections_whole_portfolio(run_app, repo):
+    _hold(repo)
+    at = run_app()
+    _go(at, "Projections").run()
+    assert not at.exception
+    labels = [m.label for m in at.metric]
+    assert labels[:5] == ["Worst case (1 in 10)", "Base case", "Best case (1 in 10)",
+                          "Money put in", "Growth (base case)"]
+    assert any(s.value.startswith("In 5 years (") for s in at.subheader)
+    assert "Projections are illustrations, not forecasts" in _texts(at)
+    worst, base, best = (float(m.value.replace("A$", "").replace(",", ""))
+                         for m in at.metric[:3])
+    assert worst < base < best
+
+    at.toggle(key="proj_real").set_value(True).run()
+    assert "In today's dollars" in _texts(at)
+    real_base = float(at.metric[1].value.replace("A$", "").replace(",", ""))
+    assert real_base < base
+
+
+def test_projections_for_a_goal_with_a_target(run_app, repo):
+    from datetime import date as _date
+
+    from share_recommender.core.models import CategoryIn
+
+    goal = repo.create_category(CategoryIn(name="Kids school fund", target_amount=Decimal(80000),
+                                           target_date=_date(2031, 1, 31)))
+    _hold(repo, category=goal)
+    at = run_app()
+    at.session_state["proj_scope"] = "goal"
+    at.session_state["proj_goal"] = str(goal.id)
+    _go(at, "Projections").run()
+    assert not at.exception
+    assert at.slider(key="proj_years").value == 5  # to Jan 2031, rounded up
+    assert "simulations reach your A$80,000 target by Jan 2031" in _texts(at)
+
+
+def test_projections_for_a_watchlist_share(run_app, repo):
+    from share_recommender.core.models import WatchlistItemIn
+
+    repo.add_to_watchlist(WatchlistItemIn(ticker="CBA", exchange="ASX"))
+    at = run_app()
+    at.session_state["proj_scope"] = "share"
+    _go(at, "Projections").run()
+    assert not at.exception
+    assert at.number_input(key="proj_amount").value == 1000.0
+    assert at.metric[3].value == "A$1,000"  # money put in
+
+
+def test_projections_share_with_nothing_held_or_watched(run_app):
+    at = run_app()
+    at.session_state["proj_scope"] = "share"
+    _go(at, "Projections").run()
+    assert not at.exception and any("Nothing held" in i.value for i in at.info)
+
+
+def test_dashboard_see_projection_opens_the_goal(run_app, repo):
+    from datetime import date as _date
+
+    from share_recommender.core.models import CategoryIn
+
+    goal = repo.create_category(CategoryIn(name="Kids school fund", target_amount=Decimal(80000),
+                                           target_date=_date(2031, 1, 31)))
+    _hold(repo, category=goal)
+    at = run_app()
+    assert not at.exception
+    at.button(key=f"see_projection_{goal.id}").click().run()
+    assert not at.exception
+    assert at.session_state["proj_goal"] == str(goal.id)
+    assert at.radio(key="proj_scope").value == "goal"
+    assert "target by Jan 2031" in _texts(at)
