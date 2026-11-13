@@ -11,6 +11,8 @@ from share_recommender.core.models import (
     CashAccountIn,
     Category,
     CategoryIn,
+    Contribution,
+    ContributionIn,
     Dividend,
     DividendIn,
     Holding,
@@ -48,6 +50,25 @@ class FakeRepository:
         self.pick_runs: list[PickRun] = []         # oldest first
         self.picks: dict[str, list[PickRow]] = {}  # run id -> picks
         self.manual_runs_today = 0
+        self.contributions: dict[UUID, Contribution] = {}
+
+    def list_contributions(self):
+        return sorted(self.contributions.values(), key=lambda c: (c.start_date, str(c.id)))
+
+    def add_contribution(self, c: ContributionIn):
+        row = Contribution(id=uuid4(), user_id=USER_ID, **c.model_dump())
+        self.contributions[row.id] = row
+        return row
+
+    def update_contribution(self, contribution_id, c: ContributionIn):
+        if contribution_id not in self.contributions:
+            raise LookupError(f"Contribution {contribution_id} not found")
+        row = Contribution(id=contribution_id, user_id=USER_ID, **c.model_dump())
+        self.contributions[contribution_id] = row
+        return row
+
+    def delete_contribution(self, contribution_id):
+        self.contributions.pop(contribution_id, None)
 
     def latest_pick_run(self, include_failed=False):
         runs = [r for r in self.pick_runs if include_failed or r.status == "ok"]
@@ -179,6 +200,9 @@ class FakeRepository:
 
     def delete_cash_account(self, account_id):
         self.cash.pop(account_id, None)
+        for cid, c in self.contributions.items():  # they become ordinary ones for the goal
+            if c.cash_account_id == account_id:
+                self.contributions[cid] = c.model_copy(update={"cash_account_id": None})
 
     def list_categories(self):
         return sorted(self.categories.values(), key=lambda c: c.name)
@@ -206,6 +230,9 @@ class FakeRepository:
         for wid, w in self.watchlist.items():
             if w.category_id == category_id:
                 self.watchlist[wid] = w.model_copy(update={"category_id": None})
+        for cid, c in self.contributions.items():  # they become whole-portfolio ones
+            if c.category_id == category_id:
+                self.contributions[cid] = c.model_copy(update={"category_id": None})
 
     def list_holdings(self, category_id=None):
         rows = [h for h in self.holdings.values()

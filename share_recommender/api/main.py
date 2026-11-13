@@ -7,7 +7,7 @@ Interactive docs:  http://127.0.0.1:8000/docs
 from dataclasses import asdict
 from datetime import date, timedelta
 from decimal import Decimal
-from typing import Annotated
+from typing import Annotated, Literal
 from uuid import UUID
 
 from fastapi import FastAPI, HTTPException, Query, Request, status
@@ -16,6 +16,7 @@ from postgrest.exceptions import APIError
 from pydantic import BaseModel
 
 from share_recommender.api.deps import MarketData, PriceStore, Ranker, Repo
+from share_recommender.core.dates import sydney_today
 from share_recommender.core.exchanges import EXCHANGES
 from share_recommender.core.importer import detect, parse_rows, read_csv
 from share_recommender.core.models import (
@@ -23,6 +24,8 @@ from share_recommender.core.models import (
     CashAccountIn,
     Category,
     CategoryIn,
+    Contribution,
+    ContributionIn,
     Dividend,
     DividendIn,
     Holding,
@@ -33,6 +36,7 @@ from share_recommender.core.models import (
     WatchlistItemIn,
 )
 from share_recommender.core.preferences import CategoryPreferences, InvestorPreferences
+from share_recommender.core.projection import PROJECTION_DISCLAIMER
 from share_recommender.core.recommender import Recommendation
 from share_recommender.data import Quote
 from share_recommender.data.candidates import candidate_pool
@@ -44,6 +48,7 @@ from share_recommender.picker_service import (
     run_picker,
 )
 from share_recommender.portfolio_service import health_report, portfolio_history
+from share_recommender.projection_service import MAX_YEARS, Scope, run_projection
 from share_recommender.recommendations import build_recommendation, provider_fns
 from share_recommender.watchlist_service import prepare_item
 
@@ -313,6 +318,70 @@ def run_picks(repo: Repo, market: MarketData, rank: Ranker) -> dict:
     repo.prune_pick_runs(KEEP_RUNS)
     run = result.run.model_copy(update={"id": UUID(str(run_id))})
     return _picks_response(run, result.picks) | {"reused": False}
+
+
+# Regular contributions and projections --------------------------------------
+
+@app.get("/contributions", response_model=list[Contribution])
+def list_contributions(repo: Repo) -> list[Contribution]:
+    return repo.list_contributions()
+
+
+@app.post("/contributions", response_model=Contribution, status_code=status.HTTP_201_CREATED)
+def add_contribution(body: ContributionIn, repo: Repo) -> Contribution:
+    return repo.add_contribution(body)
+
+
+@app.put("/contributions/{contribution_id}", response_model=Contribution)
+def update_contribution(contribution_id: UUID, body: ContributionIn, repo: Repo
+                        ) -> Contribution:
+    return repo.update_contribution(contribution_id, body)
+
+
+@app.delete("/contributions/{contribution_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_contribution(contribution_id: UUID, repo: Repo) -> None:
+    repo.delete_contribution(contribution_id)
+
+
+@app.get("/projections")
+def get_projection(repo: Repo, market: MarketData, price_store: PriceStore,
+                   scope: Scope = Scope.PORTFOLIO, category_id: UUID | None = None,
+                   ticker: str | None = None, exchange: str | None = None,
+                   amount: Annotated[Decimal | None, Query(ge=0)] = None,
+                   years: Annotated[int, Query(ge=1, le=MAX_YEARS)] = 5,
+                   basis: Literal["average", "past"] = "average", real: bool = False) -> dict:
+    """Worst, base and best values month by month for the whole portfolio, a goal or one
+    share or ETF, with money put in, the chance of reaching a goal's target and the
+    assumptions used. An illustration, not a forecast."""
+    if scope is Scope.GOAL and category_id is None:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "Give a category_id")
+    if scope is Scope.SHARE and not (ticker and exchange):
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "Give a ticker and exchange")
+    quotes_fn, fx_fn, fundamentals_fn = provider_fns(market)
+    history = CachedHistory(market, price_store)
+
+    def history_fn(symbols, currencies, base, start, end):
+        return ({s: history.history(*s, start, end) for s in symbols},
+                {c: history.fx_history(base, c, start, end) for c in currencies})
+
+    categories = repo.list_categories()
+    profile = repo.get_profile()
+    p = run_projection(
+        scope=scope, category_id=category_id, ticker=ticker.upper() if ticker else None,
+        exchange=exchange.upper() if exchange else None, amount=amount,
+        holdings=repo.list_holdings(), cash_accounts=repo.list_cash_accounts(),
+        categories=categories, contributions=repo.list_contributions(),
+        goal_prefs={c.id: repo.get_category_preferences(c.id) for c in categories},
+        inv=repo.get_preferences(), base=profile.base_currency if profile else "AUD",
+        quotes_fn=quotes_fn, fx_fn=fx_fn, history_fn=history_fn,
+        fundamentals_fn=fundamentals_fn, years=years, basis=basis, real=real,
+        today=sydney_today())
+    return {"points": [asdict(pt) for pt in p.points], "start_value": p.start_value,
+            "contributed": p.contributed, "growth": p.growth,
+            "expected_return": p.expected_return, "volatility": p.volatility,
+            "chance_of_target": p.chance_of_target,
+            "assets": [asdict(a) for a in p.assets], "notes": p.notes,
+            "disclaimer": PROJECTION_DISCLAIMER}
 
 
 # Cash accounts --------------------------------------------------------------

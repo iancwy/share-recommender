@@ -4,6 +4,7 @@ The UI only talks to the repository, core and data packages, so it can be
 replaced by a web or mobile front end on top of the FastAPI app later.
 """
 
+import json
 import re
 from datetime import date, timedelta
 from decimal import Decimal
@@ -21,6 +22,7 @@ from share_recommender.ai.explain import explain
 from share_recommender.ai.picker import rank
 from share_recommender.config import get_settings
 from share_recommender.core.category_templates import CATEGORY_TEMPLATES
+from share_recommender.core.dates import sydney_today
 from share_recommender.core.exchanges import EXCHANGES
 from share_recommender.core.health import SEVERITY_ORDER
 from share_recommender.core.importer import (
@@ -39,7 +41,10 @@ from share_recommender.core.models import (
     CashAccountIn,
     Category,
     CategoryIn,
+    Contribution,
+    ContributionIn,
     DividendIn,
+    Frequency,
     Holding,
     HoldingIn,
     ProfileIn,
@@ -51,10 +56,19 @@ from share_recommender.core.performance import Dimension, breakdown, goal_progre
 from share_recommender.core.picker import AI_DISCLAIMER, PickRow, PickRun
 from share_recommender.core.portfolio import UNCATEGORISED, totals_by_currency, value_holdings
 from share_recommender.core.preferences import CategoryPreferences, GoalStyle, InvestorPreferences
+from share_recommender.core.projection import (
+    FREQUENCY_WORDS,
+    INFLATION,
+    PROJECTION_DISCLAIMER,
+    ContributionFlow,
+    Projection,
+    contribution_goal,
+    monthly_equivalent,
+)
 from share_recommender.core.questionnaire import ABOUT_YOU, GOAL, Question
 from share_recommender.core.recommender import Recommendation, horizon_years, is_speculative
 from share_recommender.core.universe import Kind
-from share_recommender.core.watchlist import watch_rows
+from share_recommender.core.watchlist import CURRENCY_SYMBOLS, watch_rows
 from share_recommender.data import Fundamentals, Quote, get_provider
 from share_recommender.data.base import Candidate
 from share_recommender.data.candidates import candidate_pool
@@ -78,6 +92,7 @@ from share_recommender.portfolio_service import (
     valued_cash,
     valued_holdings,
 )
+from share_recommender.projection_service import MAX_YEARS, Scope, default_years, run_projection
 from share_recommender.recommendations import build_recommendation
 from share_recommender.ui.theme import ACTION_BADGE, CSS, ICON, PALETTE, SEVERITY_BADGE
 from share_recommender.watchlist_service import prepare_item
@@ -1271,6 +1286,415 @@ def _ai_picks_box(repo: PortfolioRepository, category_id) -> None:
         st.caption(AI_DISCLAIMER)
 
 
+# Projections ------------------------------------------------------------------
+
+def _into_options(categories: list[Category], accounts: list[CashAccount]) -> dict[str, str]:
+    """Where a contribution can go: code -> label."""
+    goals = {c.id: c.name for c in categories}
+    out = {"portfolio": "Whole portfolio"}
+    out |= {f"goal:{c.id}": c.name for c in categories}
+    for a in accounts:
+        where = goals.get(a.category_id, "no goal") if a.category_id else "no goal"
+        out[f"cash:{a.id}"] = f"{a.label} ({where})"
+    return out
+
+
+def _into_code(c: Contribution) -> str:
+    if c.cash_account_id:
+        return f"cash:{c.cash_account_id}"
+    return f"goal:{c.category_id}" if c.category_id else "portfolio"
+
+
+def _contribution_form(key: str, categories: list[Category], accounts: list[CashAccount],
+                       base: str, existing: Contribution | None = None
+                       ) -> ContributionIn | None:
+    options = _into_options(categories, accounts)
+    codes = list(options)
+    frequencies = list(Frequency)
+    with st.form(key, clear_on_submit=existing is None):
+        c1, c2 = st.columns(2)
+        amount = c1.number_input(f"Amount ({base})", min_value=0.0, step=50.0, format="%.2f",
+                                 key=f"{key}_amount",
+                                 value=float(existing.amount) if existing else 0.0)
+        frequency = c2.selectbox("How often", frequencies, key=f"{key}_frequency",
+                                 index=frequencies.index(existing.frequency) if existing else 2,
+                                 format_func=lambda f: str(f).capitalize())
+        c3, c4 = st.columns(2)
+        current = _into_code(existing) if existing else "portfolio"
+        into = c3.selectbox("Paid into", codes, format_func=lambda c: options.get(c, c),
+                            key=f"{key}_into",
+                            index=codes.index(current) if current in codes else 0)
+        label = c4.text_input("Label (optional)", key=f"{key}_label", max_chars=100,
+                              value=(existing.label or "") if existing else "",
+                              placeholder="e.g. Pay day top-up")
+        c5, c6 = st.columns(2)
+        start = c5.date_input("Starts", key=f"{key}_start", format="DD/MM/YYYY",
+                              value=existing.start_date if existing else sydney_today())
+        end = c6.date_input("Ends", key=f"{key}_end", format="DD/MM/YYYY",
+                            value=existing.end_date if existing and existing.end_date else None)
+        no_end = st.checkbox("No end date", key=f"{key}_no_end",
+                             value=not (existing and existing.end_date))
+        notes = st.text_input("Notes", key=f"{key}_notes",
+                              value=(existing.notes or "") if existing else "")
+        submitted = st.form_submit_button("Save changes" if existing else "Add contribution",
+                                          type="primary")
+    if not submitted:
+        return None
+    category_id = cash_account_id = None
+    if into.startswith("goal:"):
+        category_id = UUID(into.split(":", 1)[1])
+    elif into.startswith("cash:"):
+        cash_account_id = UUID(into.split(":", 1)[1])
+        account = next(a for a in accounts if a.id == cash_account_id)
+        category_id = account.category_id  # follows the account's goal
+    try:
+        return ContributionIn(label=label, amount=Decimal(str(amount)), frequency=frequency,
+                              category_id=category_id, cash_account_id=cash_account_id,
+                              start_date=start, end_date=None if no_end else end,
+                              active=existing.active if existing else True, notes=notes)
+    except ValidationError as exc:
+        _show_errors(exc)
+        return None
+
+
+def _dollars(amount, currency: str) -> str:
+    """A$1,083 (cents only when there are some); 1,083 SGD for currencies without a symbol."""
+    amount = Decimal(amount)
+    text = f"{amount:,.2f}" if amount % 1 else f"{amount:,.0f}"
+    symbol = CURRENCY_SYMBOLS.get(currency)
+    return f"{symbol}{text}" if symbol else f"{text} {currency}"
+
+
+def _how_much(c: Contribution, base: str) -> str:
+    text = f"{_dollars(c.amount, base)} {FREQUENCY_WORDS[c.frequency]}"
+    if c.frequency in (Frequency.WEEKLY, Frequency.FORTNIGHTLY):
+        text += f", about {_dollars(monthly_equivalent(c), base)} a month"
+    return text
+
+
+def _contributions_section(repo: PortfolioRepository) -> None:
+    st.subheader("Regular contributions")
+    categories = repo.list_categories()
+    accounts = repo.list_cash_accounts()
+    profile = repo.get_profile()
+    base = profile.base_currency if profile else "AUD"
+    contributions = repo.list_contributions()
+    options = _into_options(categories, accounts)
+
+    if contributions:
+        st.dataframe(pd.DataFrame([{
+            "Label": c.label or "", "Amount": _how_much(c, base),
+            "Into": options.get(_into_code(c), "Whole portfolio"),
+            "Starts": c.start_date, "Ends": c.end_date, "Included": c.active,
+        } for c in contributions]), hide_index=True, column_config={
+            "Starts": st.column_config.DateColumn(format="DD/MM/YYYY"),
+            "Ends": st.column_config.DateColumn(format="DD/MM/YYYY")})
+    else:
+        st.info("No regular contributions yet. Add one to see how topping up changes the "
+                "picture.")
+    st.caption("Contributions are added at the end of each month. Weekly and fortnightly "
+               "amounts are spread evenly over the month.")
+
+    with st.expander("Add a regular contribution", expanded=not contributions):
+        new = _contribution_form("add_contribution", categories, accounts, base)
+        if new:
+            repo.add_contribution(new)
+            st.toast("Contribution added")
+            st.rerun()
+
+    if not contributions:
+        return
+    selected = st.selectbox(
+        "Edit, pause or delete", contributions, index=None, key="contribution_pick",
+        placeholder="Choose a contribution",
+        format_func=lambda c: (f"{c.label} · " if c.label else "") + _how_much(c, base)
+        + f" into {options.get(_into_code(c), 'Whole portfolio')}")
+    if selected is None:
+        return
+    action = st.radio("What would you like to do?",
+                      ["Edit", "Include it" if not selected.active else "Pause", "Delete"],
+                      horizontal=True, key=f"contribution_action_{selected.id}")
+    if action == "Edit":
+        updated = _contribution_form(f"edit_contribution_{selected.id}", categories, accounts,
+                                     base, existing=selected)
+        if updated:
+            repo.update_contribution(selected.id, updated)
+            st.toast("Contribution updated")
+            st.rerun()
+    elif action in ("Pause", "Include it"):
+        st.caption("A paused contribution stays saved but is left out of projections.")
+        if st.button(action, key=f"contribution_toggle_{selected.id}"):
+            repo.update_contribution(selected.id, ContributionIn(**selected.model_dump(
+                include=set(ContributionIn.model_fields)) | {"active": not selected.active}))
+            st.toast("Paused" if selected.active else "Included again")
+            st.rerun()
+    else:
+        confirm = st.checkbox("Yes, I want to delete it", key=f"confirm_contribution_{selected.id}")
+        if st.button("Delete contribution", disabled=not confirm,
+                     key=f"delete_contribution_{selected.id}"):
+            repo.delete_contribution(selected.id)
+            st.toast("Contribution deleted")
+            st.rerun()
+
+
+SCOPE_LABELS = {Scope.PORTFOLIO: "Whole portfolio", Scope.GOAL: "A goal",
+                Scope.SHARE: "One share or ETF"}
+BASIS_LABELS = {"average": "Long-run averages", "past": "Past performance"}
+
+
+@st.cache_data(ttl=3 * 60 * 60, show_spinner="Working out the projection…")
+def _cached_projection(key: str, _kwargs: dict) -> Projection:
+    """``key`` is every input as JSON (choices and the saved data), so a change recomputes."""
+    return run_projection(**_kwargs)
+
+
+def _chance_sentence(chance: Decimal, target: Decimal, when: date, base: str) -> str:
+    if chance <= 5:
+        how = "Fewer than 1 in 10"
+    elif chance >= 95:
+        how = "More than 9 in 10"
+    else:
+        how = f"About {max(1, min(9, int(chance / 10 + Decimal('0.5'))))} in 10"
+    return f"{how} simulations reach your {_dollars(target, base)} target by {when:%b %Y}."
+
+
+def _projection_inputs(repo: PortfolioRepository, categories: list[Category],
+                       holdings: list[Holding], watchlist: list[WatchlistItem], base: str):
+    """The choices at the top of the page; None if there's nothing to choose."""
+    c1, c2 = st.columns(2)
+    scope = c1.radio("Project", list(SCOPE_LABELS), format_func=lambda s: SCOPE_LABELS.get(
+        s, s), key="proj_scope", horizontal=True)
+    scope = Scope(scope)
+    choice: dict = {"scope": scope}
+    category = None
+    if scope is Scope.GOAL:
+        if not categories:
+            st.info("Add a goal on the Categories page first.")
+            return None
+        ids = [str(c.id) for c in categories]
+        names = {str(c.id): c.name for c in categories}
+        if st.session_state.get("proj_goal") not in ids:
+            st.session_state["proj_goal"] = ids[0]
+        goal_id = c2.selectbox("Goal", ids, format_func=lambda i: names.get(i, i),
+                               key="proj_goal")
+        category = next(c for c in categories if str(c.id) == goal_id)
+        choice["category_id"] = category.id
+    elif scope is Scope.SHARE:
+        held = sorted({(h.ticker, h.exchange) for h in holdings})
+        watched = [w.key for w in watchlist if w.key not in set(held)]
+        options = {f"{t}:{e}": f"{t} ({e}), held" for t, e in held}
+        options |= {f"{t}:{e}": f"{t} ({e}), watchlist" for t, e in watched}
+        if not options:
+            st.info("Nothing held or on your watchlist yet. Add a share or ETF to your "
+                    "watchlist to project it.")
+            st.page_link(NAV["Watchlist"], label="Go to the Watchlist",
+                         icon=":material/visibility:")
+            return None
+        pick = c2.selectbox("Share or ETF", list(options), key="proj_share",
+                            format_func=lambda k: options.get(k, k))
+        ticker, exchange = pick.split(":", 1)
+        choice |= {"ticker": ticker, "exchange": exchange}
+        c3, c4 = st.columns(2)
+        if (ticker, exchange) not in set(held):
+            choice["amount"] = Decimal(str(c3.number_input(
+                f"Amount to invest ({base})", min_value=0.0, value=1000.0, step=500.0,
+                key="proj_amount")))
+        extra = c4.number_input(f"Add regularly ({base}, optional)", min_value=0.0,
+                                step=50.0, key="proj_extra")
+        if extra:
+            how_often = st.selectbox("How often", list(Frequency), index=2,
+                                     key="proj_extra_frequency",
+                                     format_func=lambda f: str(f).capitalize())
+            choice["extra"] = ContributionFlow(Decimal(str(extra)), Frequency(how_often),
+                                               sydney_today(), label="Your extra amount")
+
+    # A goal's horizon defaults to the years to its target date.
+    default = default_years(category, sydney_today())
+    if st.session_state.get("proj_years_for") != (scope.value, str(choice.get(
+            "category_id"))):
+        st.session_state["proj_years_for"] = (scope.value, str(choice.get("category_id")))
+        st.session_state["proj_years"] = default
+    c5, c6 = st.columns(2)
+    choice["years"] = c5.slider("Years", 1, MAX_YEARS, key="proj_years")
+    choice["basis"] = c6.radio("Based on", list(BASIS_LABELS), key="proj_basis",
+                               format_func=lambda b: BASIS_LABELS.get(b, b), horizontal=True,
+                               help="Past performance uses each holding's own record, capped "
+                                    "at 12% a year.")
+    choice["real"] = st.toggle("Show in today's dollars", key="proj_real",
+                               help=f"Takes off {INFLATION * 100:g}% a year of inflation.")
+    return choice, category
+
+
+def _projection_chart(p: Projection, base: str, target: Decimal | None = None,
+                      target_date: date | None = None) -> alt.Chart:
+    pal = _palette()
+    wide = pd.DataFrame([{"Month": pd.Timestamp(pt.month), "Worst": float(pt.worst),
+                          "Base": float(pt.base), "Best": float(pt.best),
+                          "Money put in": float(pt.put_in)} for pt in p.points])
+    x = alt.X("Month:T", title=None, axis=alt.Axis(grid=False, labelColor=pal["muted"],
+                                                     format="%b %Y", tickCount=6))
+    y_axis = alt.Axis(format=",.0f", gridColor=pal["grid"], labelColor=pal["muted"],
+                      tickCount=5)
+    band = alt.Chart(wide).mark_area(color=pal["band"], opacity=0.2).encode(
+        x=x, y=alt.Y("Worst:Q", title=None, axis=y_axis), y2="Best:Q")
+    long = wide.melt("Month", value_vars=["Base", "Money put in"], var_name="Series",
+                     value_name="Amount").replace({"Series": {"Base": "Base case"}})
+    series = ["Base case", "Money put in"]
+    lines = alt.Chart(long).mark_line(strokeWidth=2).encode(
+        x=x, y=alt.Y("Amount:Q", title=None, axis=y_axis),
+        color=alt.Color("Series:N", scale=alt.Scale(domain=series, range=pal["series"]),
+                        legend=alt.Legend(orient="top", title=None)),
+        strokeDash=alt.StrokeDash("Series:N", scale=alt.Scale(domain=series,
+                                                              range=[[1, 0], [6, 4]]),
+                                  legend=None))
+    nearest = alt.selection_point(nearest=True, on="pointerover", fields=["Month"],
+                                  empty=False)
+    targets = alt.Chart(wide).mark_rule(opacity=0, strokeWidth=12).encode(
+        x="Month:T",
+        tooltip=[alt.Tooltip("Month:T", title="Month", format="%b %Y"),
+                 alt.Tooltip("Worst:Q", title=f"Worst ({base})", format=",.0f"),
+                 alt.Tooltip("Base:Q", title=f"Base ({base})", format=",.0f"),
+                 alt.Tooltip("Best:Q", title=f"Best ({base})", format=",.0f"),
+                 alt.Tooltip("Money put in:Q", title=f"Money put in ({base})", format=",.0f")],
+    ).add_params(nearest)
+    crosshair = alt.Chart(wide).mark_rule(color=pal["muted"], strokeWidth=1).encode(
+        x="Month:T").transform_filter(nearest)
+    layers = [band, lines, crosshair, targets]
+    end = p.points[-1].month
+    if target is not None:
+        t = pd.DataFrame([{"Target": float(target), "Label": f"Target {_dollars(target, base)}"}])
+        layers.append(alt.Chart(t).mark_rule(color=pal["muted"], strokeDash=[2, 3]).encode(
+            y="Target:Q"))
+        layers.append(alt.Chart(t).mark_text(color=pal["muted"], align="left", dx=4, dy=-6,
+                                             fontSize=11).encode(
+            y="Target:Q", x=alt.value(0), text="Label:N"))
+    if target_date is not None and p.points[0].month <= target_date <= end:
+        d = pd.DataFrame([{"Month": pd.Timestamp(target_date),
+                           "Label": f"{target_date:%b %Y}"}])
+        layers.append(alt.Chart(d).mark_rule(color=pal["muted"], strokeDash=[2, 3]).encode(
+            x="Month:T"))
+        layers.append(alt.Chart(d).mark_text(color=pal["muted"], align="right", dx=-4,
+                                             fontSize=11).encode(
+            x="Month:T", y=alt.value(10), text="Label:N"))
+    return alt.layer(*layers).properties(height=340)
+
+
+def _projections_page(repo: PortfolioRepository) -> None:
+    st.caption("What your portfolio, a goal or one holding could be worth, as a range: a "
+               "worst, base and best case from 2,000 simulated paths.")
+    categories = repo.list_categories()
+    holdings = repo.list_holdings()
+    accounts = repo.list_cash_accounts()
+    contributions = repo.list_contributions()
+    watchlist = repo.list_watchlist()
+    profile = repo.get_profile()
+    base = profile.base_currency if profile else "AUD"
+    today = sydney_today()
+
+    picked = _projection_inputs(repo, categories, holdings, watchlist, base)
+    if picked is not None:
+        choice, category = picked
+        scope = choice["scope"]
+        in_scope = (
+            bool(holdings or accounts or any(c.active for c in contributions))
+            if scope is Scope.PORTFOLIO else
+            bool([h for h in holdings if h.category_id == category.id]
+                 or [a for a in accounts if a.category_id == category.id]
+                 or [c for c in contributions if c.active and contribution_goal(
+                     c, {a.id: a.category_id for a in accounts}) == category.id])
+            if scope is Scope.GOAL else True)
+        if not in_scope:
+            st.info("Add holdings, savings or a regular contribution to see a projection.")
+        else:
+            _show_projection(repo, choice, category, categories, holdings, accounts,
+                             contributions, base, today)
+    st.divider()
+    _contributions_section(repo)
+
+
+def _show_projection(repo, choice, category, categories, holdings, accounts, contributions,
+                     base, today) -> None:
+    goal_prefs = {c.id: repo.get_category_preferences(c.id) for c in categories}
+    inv = repo.get_preferences()
+    kwargs = dict(choice, holdings=holdings, cash_accounts=accounts, categories=categories,
+                  contributions=contributions, goal_prefs=goal_prefs, inv=inv, base=base,
+                  quotes_fn=_quotes, fx_fn=_fx_rates, history_fn=_history,
+                  fundamentals_fn=_fundamentals, today=today)
+    key = json.dumps({
+        "choice": {k: str(v) for k, v in choice.items()}, "today": str(today), "base": base,
+        "holdings": [h.model_dump_json() for h in holdings],
+        "accounts": [a.model_dump_json() for a in accounts],
+        "contributions": [c.model_dump_json() for c in contributions],
+        "prefs": {str(k): v.model_dump_json() if v else None for k, v in goal_prefs.items()},
+        "inv": inv.model_dump_json() if inv else None}, sort_keys=True)
+    p = _cached_projection(key, kwargs)
+    final = p.final
+    years = choice["years"]
+    st.subheader(f"In {years} year{'s' if years != 1 else ''} ({final.month:%b %Y})")
+    _metric_rows([("Worst case (1 in 10)", _dollars(final.worst, base)),
+                  ("Base case", _dollars(final.base, base)),
+                  ("Best case (1 in 10)", _dollars(final.best, base)),
+                  ("Money put in", _dollars(final.put_in, base)),
+                  ("Growth (base case)", _dollars(p.growth, base))])
+
+    target = target_date = None
+    if choice["scope"] is Scope.GOAL and category.target_amount and category.target_date:
+        target, target_date = category.target_amount, category.target_date
+        if p.chance_of_target is not None:
+            st.markdown(_chance_sentence(p.chance_of_target, target, target_date, base))
+        at_target = next((pt for pt in p.points if pt.month.year == target_date.year
+                          and pt.month.month == target_date.month), None)
+        goal_flows = [c for c in contributions if c.active and contribution_goal(
+            c, {a.id: a.category_id for a in accounts}) == category.id]
+        if at_target is not None and at_target.base < target and not goal_flows:
+            values = valued_holdings([h for h in holdings if h.category_id == category.id],
+                                     base, _quotes, _fx_rates)
+            cash = valued_cash([a for a in accounts if a.category_id == category.id], base,
+                               _fx_rates)
+            progress = goal_progress(category, values, today, cash)
+            if progress.monthly_needed:
+                st.caption(f"Adding about {_dollars(progress.monthly_needed, base)} a month "
+                           "would close the gap at the steady assumed return (the Dashboard's "
+                           "figure).")
+
+    st.altair_chart(_projection_chart(p, base, target, target_date), width="stretch")
+    caption = PROJECTION_DISCLAIMER
+    if choice["real"]:
+        caption = (f"In today's dollars: every figure has {INFLATION * 100:g}% a year of "
+                   f"inflation taken off. {caption}")
+    st.caption(caption)
+
+    with st.expander("Show as a table"):
+        rows = [pt for i, pt in enumerate(p.points) if i % 12 == 0 or pt is p.points[-1]]
+        st.dataframe(pd.DataFrame([{
+            "Year": pt.month.strftime("%b %Y"), "Worst": float(pt.worst), "Base": float(pt.base),
+            "Best": float(pt.best), "Money put in": float(pt.put_in)} for pt in rows]),
+            hide_index=True, column_config={
+                k: st.column_config.NumberColumn(format="%,.0f")
+                for k in ("Worst", "Base", "Best", "Money put in")})
+
+    with st.expander("How this works"):
+        st.markdown(
+            "Each month, 2,000 possible paths are drawn from the expected return and the ups "
+            "and downs (volatility) below. The worst and best cases are the paths that 1 in "
+            "10 do worse or better than; the base case is the middle one. Savings accounts "
+            "grow at their own interest rate, with no ups and downs.")
+        st.dataframe(pd.DataFrame([{
+            "Holding or account": a.label, "Value": float(a.value),
+            "Return a year": float(a.expected_return * 100),
+            "Ups and downs a year": float(a.volatility * 100), "Based on": a.source}
+            for a in p.assets]), hide_index=True, column_config={
+                "Value": st.column_config.NumberColumn(format="%,.0f"),
+                "Return a year": st.column_config.NumberColumn(format="%.1f%%"),
+                "Ups and downs a year": st.column_config.NumberColumn(format="%.1f%%"),
+                "Based on": st.column_config.TextColumn(width="large")})
+        if p.volatility:
+            st.markdown(f"Invested together: about {p.expected_return * 100:.1f}% a year, "
+                        f"with ups and downs of about {p.volatility * 100:.1f}% a year.")
+        for note in p.notes:
+            st.caption(note)
+
+
 # Charts -----------------------------------------------------------------------
 # Colours come from ui/theme.py, in light and dark steps.
 
@@ -1426,10 +1850,15 @@ def _dashboard_page(repo: PortfolioRepository) -> None:
                            f"{cat.target_date:%b %Y} at an assumed {p.assumed_return * 100:g}% "
                            f"a year. Adding about {_money(p.monthly_needed, base)} a month "
                            "would close the gap.")
+            if st.button("See projection", key=f"see_projection_{cat.id}",
+                         icon=":material/trending_up:", type="tertiary"):
+                st.session_state["proj_scope"] = Scope.GOAL.value
+                st.session_state["proj_goal"] = str(cat.id)
+                st.switch_page(NAV["Projections"])
     st.caption("Projections assume steady returns of 7% a year for shares and 3.5% for cash "
                "funds, with savings accounts at their own interest rate, before fees and tax. "
                "Real returns vary a lot from year to year; this is an illustration, not a "
-               "forecast.")
+               "forecast. See the Projections page for a range of outcomes.")
 
 
 # Health check -----------------------------------------------------------------
@@ -1944,7 +2373,8 @@ def _page(name: str, render, repo: PortfolioRepository, email: str):
 
 
 MISSING_SCHEMA = {"42703", "42P01", "PGRST204", "PGRST205"}  # a missing column or table
-FOOTER_PAGES = {"Dashboard", "Recommendations", "Picker", "Health check", "Notifications"}
+FOOTER_PAGES = {"Dashboard", "Recommendations", "Picker", "Health check", "Projections",
+                "Notifications"}
 
 
 def _price_message(priced: list[bool]) -> None:
@@ -1981,6 +2411,7 @@ PAGES = {  # name -> (icon, page function); Profile also needs the email
     "Picker": (":material/auto_awesome:", _picker_page),
     "Dividends": (":material/payments:", _dividends_page),
     "Health check": (":material/health_and_safety:", _health_page),
+    "Projections": (":material/trending_up:", _projections_page),
     "Notifications": (":material/notifications:", _notifications_page),
     "Profile": (":material/person:", None),
 }

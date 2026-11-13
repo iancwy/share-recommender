@@ -252,6 +252,50 @@ never changes the numbers.
   picker is a baseline for them. Watchlist alerts fire once per level and are remembered in
   the portfolio snapshot's `sent` list, like price moves.
 
+## Projections (Week 6)
+
+- **Assumptions** (`core/projection.py`, the constants at the top). Each holding gets a yearly
+  return and volatility; they're assumptions, not forecasts:
+
+  | What | Return a year | Ups and downs a year |
+  |---|---|---|
+  | Australian or international shares ETF | 7% | 15% |
+  | Emerging markets ETF | 7% | 20% |
+  | Cash ETF (e.g. AAA) | 3.5% | 1% |
+  | Individual share | 7% | its own 3-year volatility, kept to 15%–60% (30% if under a year) |
+  | Speculative share or theme ETF | 7% | its own, kept to 20%–80% (40% if under a year) |
+  | Savings account | its interest rate | none |
+
+  The returns are `ASSUMED_RETURN` in `core/performance.py`, the same figures as the
+  Dashboard's goal cards, so the two pages agree. Multi-class funds such as VDHG take the
+  weighted average. Volatility comes from month-end closes: the standard deviation of monthly
+  log returns times √12.
+- **Past performance** (opt-in): up to 10 years of price growth plus the trailing dividend
+  yield (our prices aren't adjusted for dividends), **kept between 0% and 12% a year** so a
+  few great years can't drive a 40-year projection; the note says when it was capped. Under
+  3 years of prices falls back to the long-run averages.
+- **Combining**: the invested part is one portfolio, weighted by value, with a single
+  correlation of 0.7 between any two share assets (0 with a cash fund). It's simple and
+  slightly cautious; a full correlation matrix from prices is a possible later step.
+- **The engine** (`project()`): monthly steps, 2,000 paths with a fixed seed (the same inputs
+  always give the same chart). Each month's log return is drawn with mean `ln(1 + μ) / 12` and
+  standard deviation `σ / √12`, so the median path grows at exactly `μ` and the base case
+  matches the Dashboard's steady figure. Savings grow at their rate on every path.
+  Contributions land at the end of each month (weekly and fortnightly ones spread evenly).
+  Worst, base and best are the 10th, 50th and 90th percentiles of the total, month by month.
+  Today's dollars take off 2.5% a year of inflation. The chance of reaching a goal's target is
+  the share of paths at or above it in the target month, rounded to 5% and kept between 5%
+  and 95%.
+- **Scopes** (`projection_service.py`): the whole portfolio, one goal (its holdings, savings
+  and contributions, including those into its savings accounts; whole-portfolio ones are
+  left out, with a note), or one share or ETF (what's held, or a typed amount for a watchlist
+  item, plus an optional unsaved top-up). A goal with nothing invested uses its target mix.
+- **Contributions** (`contributions` table, owner-only): an amount in the base currency, how
+  often, the goal or savings account (an account's goal wins), start and optional end dates,
+  and an "included" flag. Deleting a goal makes its contributions whole-portfolio ones;
+  deleting an account keeps them for the goal. Projections aren't stored and don't send
+  notifications.
+
 ## Possible later work
 
 - Selling: reduce parcels and record capital gains, including sales from broker exports.
@@ -260,3 +304,5 @@ never changes the numbers.
 - Feeding AI picks into the buy plan (today they sit alongside the rules recommendation).
 - A prompt-tuning workflow for the picker, starting from the sample profiles in
   `tests/fixtures/picker/`.
+- A notification when a goal's chance of reaching its target drops below 50%.
+- Fees, tax and a correlation matrix in projections.
