@@ -20,11 +20,12 @@ import argparse
 import logging
 import sys
 from collections.abc import Callable
-from datetime import UTC, date, datetime, timedelta
+from datetime import date
 from uuid import UUID
 
 from share_recommender.ai.picker import Ranked, rank
 from share_recommender.config import JobSettings
+from share_recommender.core.dates import sydney_today
 from share_recommender.core.notifications import compose_email
 from share_recommender.data import MarketDataProvider, get_provider
 from share_recommender.data.candidates import candidate_pool
@@ -39,15 +40,6 @@ from share_recommender.picker_service import KEEP_RUNS, PickerNotReady, run_pick
 from share_recommender.recommendations import provider_fns
 
 log = logging.getLogger("notify")
-
-
-def sydney_today() -> date:
-    try:
-        from zoneinfo import ZoneInfo
-
-        return datetime.now(ZoneInfo("Australia/Sydney")).date()
-    except Exception:  # no time zone database (e.g. Windows without tzdata): close enough
-        return (datetime.now(UTC) + timedelta(hours=10)).date()
 
 
 def is_due(frequency: str, today: date, force: bool) -> bool:
