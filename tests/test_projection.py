@@ -6,8 +6,9 @@ from decimal import Decimal
 from uuid import uuid4
 
 import pytest
+from pydantic import ValidationError
 
-from share_recommender.core.models import CashAccount
+from share_recommender.core.models import CashAccount, Contribution, ContributionIn
 from share_recommender.core.performance import ASSUMED_RETURN, CashValue
 from share_recommender.core.projection import (
     CORRELATION,
@@ -16,11 +17,14 @@ from share_recommender.core.projection import (
     Frequency,
     cash_asset,
     combine,
+    contribution_goal,
     holding_asset,
     month_end_closes,
+    monthly_equivalent,
     paid_in_month,
     project,
     target_mix_assets,
+    to_flows,
     volatility,
 )
 from share_recommender.core.recommender import BASE_GROWTH
@@ -274,3 +278,59 @@ def test_forty_years_runs_in_under_a_second():
              ContributionFlow(D(100), Frequency.MONTHLY, TODAY, into_cash_rate=D("0.05"))],
             today=TODAY, years=40)
     assert time.perf_counter() - started < 1
+
+
+# Saved contributions -----------------------------------------------------------------------
+
+
+def _c(**kw):
+    return Contribution(id=uuid4(), user_id=USER_ID, **({"amount": D(100)} | kw))
+
+
+def test_contribution_validation():
+    with pytest.raises(ValidationError):
+        ContributionIn(amount=D(0))
+    with pytest.raises(ValidationError, match="end date"):
+        ContributionIn(amount=D(10), start_date=date(2027, 1, 1), end_date=date(2026, 1, 1))
+    c = ContributionIn(amount=D(10), label="  ", notes="")
+    assert c.label is None and c.notes is None and c.frequency is Frequency.MONTHLY
+
+
+@pytest.mark.parametrize("frequency, monthly", [
+    ("weekly", 2167), ("fortnightly", 1083), ("monthly", 500), ("quarterly", 167),
+    ("yearly", 42)])
+def test_monthly_equivalent(frequency, monthly):
+    assert monthly_equivalent(_c(amount=D(500), frequency=frequency)) == D(monthly)
+
+
+def test_to_flows():
+    account = CashAccount(id=uuid4(), user_id=USER_ID, institution="ING", balance=D(0),
+                          interest_rate=D("5.5"), as_of=TODAY, category_id=uuid4())
+    goal = uuid4()
+    rows = [_c(label="paused", active=False),
+            _c(label="ended", start_date=date(2025, 1, 1), end_date=date(2026, 1, 1)),
+            _c(label="saver", cash_account_id=account.id, category_id=goal),
+            _c(label="plain", frequency="fortnightly", category_id=goal)]
+    flows = to_flows(rows, {account.id: account}, TODAY)
+    assert [f.label for f in flows] == ["saver", "plain"]
+    assert flows[0].into_cash_rate == D("0.055") and flows[1].into_cash_rate is None
+    # The account's goal wins over the saved one.
+    cash_goals = {account.id: account.category_id}
+    assert contribution_goal(rows[2], cash_goals) == account.category_id
+    assert contribution_goal(rows[3], cash_goals) == goal
+    assert contribution_goal(_c(), cash_goals) is None
+
+
+def test_fake_repository_contributions():
+    from tests.fakes import FakeRepository
+
+    repo = FakeRepository()
+    goal = next(iter(repo.categories))
+    c = repo.add_contribution(ContributionIn(amount=D(500), frequency="fortnightly",
+                                             category_id=goal))
+    repo.update_contribution(c.id, ContributionIn(amount=D(600), category_id=goal))
+    assert repo.list_contributions()[0].amount == D(600)
+    repo.delete_category(goal)  # becomes a whole-portfolio contribution
+    assert repo.list_contributions()[0].category_id is None
+    repo.delete_contribution(c.id)
+    assert repo.list_contributions() == []

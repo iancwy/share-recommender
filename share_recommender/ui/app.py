@@ -21,6 +21,7 @@ from share_recommender.ai.explain import explain
 from share_recommender.ai.picker import rank
 from share_recommender.config import get_settings
 from share_recommender.core.category_templates import CATEGORY_TEMPLATES
+from share_recommender.core.dates import sydney_today
 from share_recommender.core.exchanges import EXCHANGES
 from share_recommender.core.health import SEVERITY_ORDER
 from share_recommender.core.importer import (
@@ -39,7 +40,10 @@ from share_recommender.core.models import (
     CashAccountIn,
     Category,
     CategoryIn,
+    Contribution,
+    ContributionIn,
     DividendIn,
+    Frequency,
     Holding,
     HoldingIn,
     ProfileIn,
@@ -51,10 +55,11 @@ from share_recommender.core.performance import Dimension, breakdown, goal_progre
 from share_recommender.core.picker import AI_DISCLAIMER, PickRow, PickRun
 from share_recommender.core.portfolio import UNCATEGORISED, totals_by_currency, value_holdings
 from share_recommender.core.preferences import CategoryPreferences, GoalStyle, InvestorPreferences
+from share_recommender.core.projection import FREQUENCY_WORDS, monthly_equivalent
 from share_recommender.core.questionnaire import ABOUT_YOU, GOAL, Question
 from share_recommender.core.recommender import Recommendation, horizon_years, is_speculative
 from share_recommender.core.universe import Kind
-from share_recommender.core.watchlist import watch_rows
+from share_recommender.core.watchlist import CURRENCY_SYMBOLS, watch_rows
 from share_recommender.data import Fundamentals, Quote, get_provider
 from share_recommender.data.base import Candidate
 from share_recommender.data.candidates import candidate_pool
@@ -1271,6 +1276,161 @@ def _ai_picks_box(repo: PortfolioRepository, category_id) -> None:
         st.caption(AI_DISCLAIMER)
 
 
+# Projections ------------------------------------------------------------------
+
+def _into_options(categories: list[Category], accounts: list[CashAccount]) -> dict[str, str]:
+    """Where a contribution can go: code -> label."""
+    goals = {c.id: c.name for c in categories}
+    out = {"portfolio": "Whole portfolio"}
+    out |= {f"goal:{c.id}": c.name for c in categories}
+    for a in accounts:
+        where = goals.get(a.category_id, "no goal") if a.category_id else "no goal"
+        out[f"cash:{a.id}"] = f"{a.label} ({where})"
+    return out
+
+
+def _into_code(c: Contribution) -> str:
+    if c.cash_account_id:
+        return f"cash:{c.cash_account_id}"
+    return f"goal:{c.category_id}" if c.category_id else "portfolio"
+
+
+def _contribution_form(key: str, categories: list[Category], accounts: list[CashAccount],
+                       base: str, existing: Contribution | None = None
+                       ) -> ContributionIn | None:
+    options = _into_options(categories, accounts)
+    codes = list(options)
+    frequencies = list(Frequency)
+    with st.form(key, clear_on_submit=existing is None):
+        c1, c2 = st.columns(2)
+        amount = c1.number_input(f"Amount ({base})", min_value=0.0, step=50.0, format="%.2f",
+                                 key=f"{key}_amount",
+                                 value=float(existing.amount) if existing else 0.0)
+        frequency = c2.selectbox("How often", frequencies, key=f"{key}_frequency",
+                                 index=frequencies.index(existing.frequency) if existing else 2,
+                                 format_func=lambda f: str(f).capitalize())
+        c3, c4 = st.columns(2)
+        current = _into_code(existing) if existing else "portfolio"
+        into = c3.selectbox("Paid into", codes, format_func=lambda c: options.get(c, c),
+                            key=f"{key}_into",
+                            index=codes.index(current) if current in codes else 0)
+        label = c4.text_input("Label (optional)", key=f"{key}_label", max_chars=100,
+                              value=(existing.label or "") if existing else "",
+                              placeholder="e.g. Pay day top-up")
+        c5, c6 = st.columns(2)
+        start = c5.date_input("Starts", key=f"{key}_start", format="DD/MM/YYYY",
+                              value=existing.start_date if existing else sydney_today())
+        end = c6.date_input("Ends", key=f"{key}_end", format="DD/MM/YYYY",
+                            value=existing.end_date if existing and existing.end_date else None)
+        no_end = st.checkbox("No end date", key=f"{key}_no_end",
+                             value=not (existing and existing.end_date))
+        notes = st.text_input("Notes", key=f"{key}_notes",
+                              value=(existing.notes or "") if existing else "")
+        submitted = st.form_submit_button("Save changes" if existing else "Add contribution",
+                                          type="primary")
+    if not submitted:
+        return None
+    category_id = cash_account_id = None
+    if into.startswith("goal:"):
+        category_id = UUID(into.split(":", 1)[1])
+    elif into.startswith("cash:"):
+        cash_account_id = UUID(into.split(":", 1)[1])
+        account = next(a for a in accounts if a.id == cash_account_id)
+        category_id = account.category_id  # follows the account's goal
+    try:
+        return ContributionIn(label=label, amount=Decimal(str(amount)), frequency=frequency,
+                              category_id=category_id, cash_account_id=cash_account_id,
+                              start_date=start, end_date=None if no_end else end,
+                              active=existing.active if existing else True, notes=notes)
+    except ValidationError as exc:
+        _show_errors(exc)
+        return None
+
+
+def _dollars(amount, currency: str) -> str:
+    """A$1,083 (cents only when there are some); 1,083 SGD for currencies without a symbol."""
+    amount = Decimal(amount)
+    text = f"{amount:,.2f}" if amount % 1 else f"{amount:,.0f}"
+    symbol = CURRENCY_SYMBOLS.get(currency)
+    return f"{symbol}{text}" if symbol else f"{text} {currency}"
+
+
+def _how_much(c: Contribution, base: str) -> str:
+    text = f"{_dollars(c.amount, base)} {FREQUENCY_WORDS[c.frequency]}"
+    if c.frequency in (Frequency.WEEKLY, Frequency.FORTNIGHTLY):
+        text += f", about {_dollars(monthly_equivalent(c), base)} a month"
+    return text
+
+
+def _contributions_section(repo: PortfolioRepository) -> None:
+    st.subheader("Regular contributions")
+    categories = repo.list_categories()
+    accounts = repo.list_cash_accounts()
+    profile = repo.get_profile()
+    base = profile.base_currency if profile else "AUD"
+    contributions = repo.list_contributions()
+    options = _into_options(categories, accounts)
+
+    if contributions:
+        st.dataframe(pd.DataFrame([{
+            "Label": c.label or "", "Amount": _how_much(c, base),
+            "Into": options.get(_into_code(c), "Whole portfolio"),
+            "Starts": c.start_date, "Ends": c.end_date, "Included": c.active,
+        } for c in contributions]), hide_index=True, column_config={
+            "Starts": st.column_config.DateColumn(format="DD/MM/YYYY"),
+            "Ends": st.column_config.DateColumn(format="DD/MM/YYYY")})
+    else:
+        st.info("No regular contributions yet. Add one to see how topping up changes the "
+                "picture.")
+    st.caption("Contributions are added at the end of each month. Weekly and fortnightly "
+               "amounts are spread evenly over the month.")
+
+    with st.expander("Add a regular contribution", expanded=not contributions):
+        new = _contribution_form("add_contribution", categories, accounts, base)
+        if new:
+            repo.add_contribution(new)
+            st.toast("Contribution added")
+            st.rerun()
+
+    if not contributions:
+        return
+    selected = st.selectbox(
+        "Edit, pause or delete", contributions, index=None, key="contribution_pick",
+        placeholder="Choose a contribution",
+        format_func=lambda c: (f"{c.label} · " if c.label else "") + _how_much(c, base)
+        + f" into {options.get(_into_code(c), 'Whole portfolio')}")
+    if selected is None:
+        return
+    action = st.radio("What would you like to do?",
+                      ["Edit", "Include it" if not selected.active else "Pause", "Delete"],
+                      horizontal=True, key=f"contribution_action_{selected.id}")
+    if action == "Edit":
+        updated = _contribution_form(f"edit_contribution_{selected.id}", categories, accounts,
+                                     base, existing=selected)
+        if updated:
+            repo.update_contribution(selected.id, updated)
+            st.toast("Contribution updated")
+            st.rerun()
+    elif action in ("Pause", "Include it"):
+        st.caption("A paused contribution stays saved but is left out of projections.")
+        if st.button(action, key=f"contribution_toggle_{selected.id}"):
+            repo.update_contribution(selected.id, ContributionIn(**selected.model_dump(
+                include=set(ContributionIn.model_fields)) | {"active": not selected.active}))
+            st.toast("Paused" if selected.active else "Included again")
+            st.rerun()
+    else:
+        confirm = st.checkbox("Yes, I want to delete it", key=f"confirm_contribution_{selected.id}")
+        if st.button("Delete contribution", disabled=not confirm,
+                     key=f"delete_contribution_{selected.id}"):
+            repo.delete_contribution(selected.id)
+            st.toast("Contribution deleted")
+            st.rerun()
+
+
+def _projections_page(repo: PortfolioRepository) -> None:
+    _contributions_section(repo)
+
+
 # Charts -----------------------------------------------------------------------
 # Colours come from ui/theme.py, in light and dark steps.
 
@@ -1981,6 +2141,7 @@ PAGES = {  # name -> (icon, page function); Profile also needs the email
     "Picker": (":material/auto_awesome:", _picker_page),
     "Dividends": (":material/payments:", _dividends_page),
     "Health check": (":material/health_and_safety:", _health_page),
+    "Projections": (":material/trending_up:", _projections_page),
     "Notifications": (":material/notifications:", _notifications_page),
     "Profile": (":material/person:", None),
 }

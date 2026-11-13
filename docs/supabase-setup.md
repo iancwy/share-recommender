@@ -33,6 +33,9 @@
    - `20261108000300_ai_picks.sql`: the AI picker's runs and picks (owner-only; nobody
      edits them once written), the `picker_frequency` setting on `profiles`, and two new
      notification kinds.
+   - `20261115000100_contributions.sql`: regular contributions used in projections
+     (owner-only), and a `unique (id, user_id)` on `cash_accounts` so a contribution can
+     only point at its owner's savings accounts.
 
    (If you prefer the Supabase CLI: `supabase link --project-ref <ref>` then `supabase db push`.)
 

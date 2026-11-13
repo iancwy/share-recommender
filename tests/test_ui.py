@@ -669,3 +669,66 @@ def test_recommendations_show_the_ai_picks(run_app, repo):
     text = " ".join(m.value for m in at.markdown)
     assert "AI picks for this goal" in text and "**CBA** (high conviction)" in text
     assert "BHP" not in text.split("AI picks for this goal")[1]  # holds aren't buy ideas
+
+
+# Projections: regular contributions --------------------------------------------------------
+
+def _pick_contribution(at, text):
+    box = at.selectbox(key="contribution_pick")
+    box.select_index(next(i for i, o in enumerate(box.options) if text in o)).run()
+
+
+def test_contributions_add_edit_pause_delete(run_app, repo):
+    from datetime import date as _date
+
+    from share_recommender.core.models import CashAccountIn
+
+    goal = next(iter(repo.categories.values()))
+    repo.create_cash_account(CashAccountIn(institution="ING", account_name="Saver",
+                                                   balance=Decimal(1000),
+                                                   interest_rate=Decimal(5),
+                                                   as_of=_date(2026, 11, 1),
+                                                   category_id=goal.id))
+    at = run_app()
+    _go(at, "Projections").run()
+    assert not at.exception
+    assert any("No regular contributions yet" in i.value for i in at.info)
+
+    # A$500 a fortnight into the goal.
+    at.number_input(key="add_contribution_amount").set_value(500.0)
+    at.selectbox(key="add_contribution_frequency").select_index(1)  # fortnightly
+    at.selectbox(key="add_contribution_into").select_index(1)       # the goal
+    at.text_input(key="add_contribution_label").input("Pay day top-up")
+    _button(at, "Add contribution").click().run()
+    assert not at.exception
+    (c,) = repo.contributions.values()
+    assert (c.amount, c.frequency, c.category_id, c.end_date, c.active) == \
+        (Decimal(500), "fortnightly", goal.id, None, True)
+
+    # A$200 a month into the savings account: its goal comes with it.
+    at.number_input(key="add_contribution_amount").set_value(200.0)
+    at.selectbox(key="add_contribution_frequency").select_index(2)  # monthly
+    at.selectbox(key="add_contribution_into").select_index(2)       # the savings account
+    _button(at, "Add contribution").click().run()
+    into_saver = next(x for x in repo.contributions.values() if x.cash_account_id)
+    assert into_saver.category_id == goal.id
+    table = at.dataframe[0].value
+    assert "A$500 a fortnight, about A$1,083 a month" in list(table["Amount"])
+    assert "ING Saver (General investing)" in list(table["Into"])
+
+    # Edit, pause and delete.
+    _pick_contribution(at, "Pay day top-up")
+    at.number_input(key=f"edit_contribution_{c.id}_amount").set_value(600.0)
+    _button(at, "Save changes").click().run()
+    assert repo.contributions[c.id].amount == Decimal(600)
+
+    _pick_contribution(at, "Pay day top-up")
+    at.radio(key=f"contribution_action_{c.id}").set_value("Pause").run()
+    at.button(key=f"contribution_toggle_{c.id}").click().run()
+    assert repo.contributions[c.id].active is False
+
+    _pick_contribution(at, "Pay day top-up")
+    at.radio(key=f"contribution_action_{c.id}").set_value("Delete").run()
+    at.checkbox(key=f"confirm_contribution_{c.id}").check().run()
+    at.button(key=f"delete_contribution_{c.id}").click().run()
+    assert c.id not in repo.contributions and not at.exception

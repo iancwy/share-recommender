@@ -294,3 +294,46 @@ class Profile(ProfileIn):
     @property
     def platform_for_new(self) -> str:
         return self.default_platform or FALLBACK_PLATFORM
+
+
+class Frequency(StrEnum):
+    """How often a regular contribution is paid."""
+
+    WEEKLY = "weekly"
+    FORTNIGHTLY = "fortnightly"
+    MONTHLY = "monthly"
+    QUARTERLY = "quarterly"
+    YEARLY = "yearly"
+
+
+class ContributionIn(BaseModel):
+    """A regular payment into the whole portfolio, a goal or a savings account. The amount
+    is in the person's base currency."""
+
+    label: str | None = Field(default=None, max_length=100, description="e.g. Pay day top-up")
+    amount: Decimal = Field(gt=0, max_digits=14, decimal_places=2,
+                            description="Each payment, in the base currency")
+    frequency: Frequency = Frequency.MONTHLY
+    category_id: UUID | None = Field(default=None, description="The goal; none = whole portfolio")
+    cash_account_id: UUID | None = Field(default=None, description="Paid into this account")
+    start_date: date = Field(default_factory=date.today)
+    end_date: date | None = None
+    active: bool = Field(default=True, description="Untick to leave it out of projections")
+    notes: str | None = Field(default=None, max_length=1000)
+
+    _blank = field_validator("label", "notes")(lambda v: blank_is_none(v))
+
+    @model_validator(mode="after")
+    def _end_after_start(self) -> "ContributionIn":
+        if self.end_date is not None and self.end_date < self.start_date:
+            raise ValueError("The end date must be on or after the start date")
+        return self
+
+
+class Contribution(ContributionIn):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    user_id: UUID
+    created_at: datetime | None = None
+    updated_at: datetime | None = None

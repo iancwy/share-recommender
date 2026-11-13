@@ -11,10 +11,11 @@ import math
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
-from enum import StrEnum
+from uuid import UUID
 
 import numpy as np
 
+from share_recommender.core.models import Contribution, Frequency
 from share_recommender.core.performance import ASSUMED_RETURN, CashValue
 from share_recommender.core.universe import (
     SPECULATIVE_SHARES,
@@ -258,14 +259,6 @@ PROJECTION_DISCLAIMER = (
     "personal financial advice.")
 
 
-class Frequency(StrEnum):
-    WEEKLY = "weekly"
-    FORTNIGHTLY = "fortnightly"
-    MONTHLY = "monthly"
-    QUARTERLY = "quarterly"
-    YEARLY = "yearly"
-
-
 PER_MONTH = {Frequency.WEEKLY: D(52) / 12, Frequency.FORTNIGHTLY: D(26) / 12,
              Frequency.MONTHLY: D(1)}
 
@@ -330,6 +323,42 @@ def paid_in_month(c: ContributionFlow, month: date) -> Decimal:
     since = _months_between(_month(c.start), month)
     step = 3 if c.frequency is Frequency.QUARTERLY else 12
     return c.amount if since % step == 0 else D(0)
+
+
+FREQUENCY_WORDS = {Frequency.WEEKLY: "a week", Frequency.FORTNIGHTLY: "a fortnight",
+                   Frequency.MONTHLY: "a month", Frequency.QUARTERLY: "a quarter",
+                   Frequency.YEARLY: "a year"}
+PER_YEAR = {Frequency.WEEKLY: 52, Frequency.FORTNIGHTLY: 26, Frequency.MONTHLY: 12,
+            Frequency.QUARTERLY: 4, Frequency.YEARLY: 1}
+
+
+def monthly_equivalent(c: Contribution | ContributionFlow) -> Decimal:
+    """About how much a month a contribution adds, for display."""
+    return (c.amount * PER_YEAR[c.frequency] / 12).quantize(D(1))
+
+
+def contribution_goal(c: Contribution, cash_goals: dict) -> UUID | None:
+    """The goal a contribution belongs to: its savings account's goal when it's paid into one
+    (the account wins over the saved goal), else its own; None means the whole portfolio."""
+    if c.cash_account_id is not None and c.cash_account_id in cash_goals:
+        return cash_goals[c.cash_account_id]
+    return c.category_id
+
+
+def to_flows(contributions: list[Contribution], cash_by_id: dict, today: date
+             ) -> list[ContributionFlow]:
+    """Saved contributions as the engine's flows. Paused ones and ones that have already
+    ended are left out; one paid into a savings account grows at that account's rate.
+    ``cash_by_id`` maps account ids to ``CashAccount``s."""
+    flows = []
+    for c in contributions:
+        if not c.active or (c.end_date is not None and c.end_date < today):
+            continue
+        account = cash_by_id.get(c.cash_account_id) if c.cash_account_id else None
+        flows.append(ContributionFlow(
+            c.amount, c.frequency, c.start_date, c.end_date,
+            account.interest_rate / 100 if account is not None else None, c.label))
+    return flows
 
 
 def project(assets: list[Asset], contributions: list[ContributionFlow], *, today: date,

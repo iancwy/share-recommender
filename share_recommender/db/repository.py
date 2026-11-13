@@ -15,6 +15,8 @@ from share_recommender.core.models import (
     CashAccountIn,
     Category,
     CategoryIn,
+    Contribution,
+    ContributionIn,
     Dividend,
     DividendIn,
     Holding,
@@ -46,7 +48,7 @@ def sydney_midnight() -> datetime:
 
 
 def _payload(model: CategoryIn | HoldingIn | CashAccountIn | DividendIn | WatchlistItemIn
-             ) -> dict[str, Any]:
+                   | ContributionIn) -> dict[str, Any]:
     return model.model_dump(mode="json")
 
 
@@ -316,3 +318,24 @@ class PortfolioRepository:
         old = [r["id"] for r in rows[keep:]]
         if old:
             self._db.table("pick_runs").delete().in_("id", old).execute()
+
+    # Regular contributions -------------------------------------------------
+
+    def list_contributions(self) -> list[Contribution]:
+        rows = (self._db.table("contributions").select("*").order("start_date").execute()
+                .data)
+        return [Contribution.model_validate(r) for r in rows]
+
+    def add_contribution(self, c: ContributionIn) -> Contribution:
+        rows = self._db.table("contributions").insert(_payload(c)).execute().data
+        return Contribution.model_validate(rows[0])
+
+    def update_contribution(self, contribution_id: UUID, c: ContributionIn) -> Contribution:
+        rows = (self._db.table("contributions").update(_payload(c))
+                .eq("id", str(contribution_id)).execute().data)
+        if not rows:
+            raise LookupError(f"Contribution {contribution_id} not found")
+        return Contribution.model_validate(rows[0])
+
+    def delete_contribution(self, contribution_id: UUID) -> None:
+        self._db.table("contributions").delete().eq("id", str(contribution_id)).execute()
