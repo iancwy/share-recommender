@@ -28,6 +28,11 @@ Ian's private share and ETF recommender and portfolio dashboard.
   answers and goals, checked, and saved. It runs on demand from the Picker page (5 a day) and
   weekly on Mondays from the notifications job, which also sends new buy ideas and watchlist
   alerts.
+- Week 6: **projections** of the whole portfolio, a goal or one share or ETF over 1 to 40
+  years, as a worst, base and best case (1 in 10, the middle, 1 in 10) from 2,000 simulated
+  paths, with the chance of reaching a goal's target; **regular contributions** (weekly to
+  yearly, into the portfolio, a goal or a savings account) included in every scenario; and
+  savings accounts growing at their own interest rate.
 
 ## Run it locally (VS Code)
 
@@ -103,6 +108,7 @@ GitHub Actions runs both on every push and pull request (`.github/workflows/ci.y
 ```
 share_recommender/
   core/       models, exchanges, valuation, interview answers, curated investment list,
+              projections (assumptions and the Monte Carlo engine),
               recommender, health check, notifications, watchlist, the picker's rules
               screen and checks (pure Python, no network)
   data/       market data providers (Yahoo Finance first, pluggable), discovery and seed
@@ -110,6 +116,7 @@ share_recommender/
   ai/         chat interview, plain-English explanations and the picker's ranking (Claude)
   recommendations.py   fetches prices, FX and dividend data, then runs the recommender
   picker_service.py    runs the AI picker: pool, screen, Claude, checks
+  projection_service.py gathers one scope and runs a projection
   watchlist_service.py looks up a ticker before it goes on the watchlist
   portfolio_service.py gathers data for the dashboard and health check
   notifier.py          works out what's new for a person's notifications
