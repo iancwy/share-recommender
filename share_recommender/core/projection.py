@@ -9,7 +9,11 @@ prices (capped) if the person chooses "Past performance". The returns are the Da
 
 import math
 from dataclasses import dataclass
+from datetime import date
 from decimal import Decimal
+from enum import StrEnum
+
+import numpy as np
 
 from share_recommender.core.performance import ASSUMED_RETURN, CashValue
 from share_recommender.core.universe import (
@@ -237,3 +241,170 @@ def combine(assets: list[Asset]) -> tuple[Decimal, Decimal]:
                    else CORRELATION)
             var += w[i] * w[j] * rho * a.volatility * b.volatility
     return mu.quantize(D("0.0001")), var.sqrt().quantize(D("0.0001"))
+
+
+# The projection engine ----------------------------------------------------------------------
+
+PATHS = 2000
+SEED = 6
+WORST_PCT, BASE_PCT, BEST_PCT = 10, 50, 90   # "1 in 10" worse, the middle, "1 in 10" better
+INFLATION = D("0.025")                        # the RBA's target midpoint, for today's dollars
+CHANCE_STEP, CHANCE_MIN, CHANCE_MAX = D(5), D(5), D(95)
+
+PROJECTION_DISCLAIMER = (
+    "Projections are illustrations, not forecasts. They use assumed returns and past prices, "
+    "and real results can be much better or worse. Figures are before fees and tax, and in "
+    "future dollars unless you chose today's dollars. This is general information, not "
+    "personal financial advice.")
+
+
+class Frequency(StrEnum):
+    WEEKLY = "weekly"
+    FORTNIGHTLY = "fortnightly"
+    MONTHLY = "monthly"
+    QUARTERLY = "quarterly"
+    YEARLY = "yearly"
+
+
+PER_MONTH = {Frequency.WEEKLY: D(52) / 12, Frequency.FORTNIGHTLY: D(26) / 12,
+             Frequency.MONTHLY: D(1)}
+
+
+@dataclass(frozen=True)
+class ContributionFlow:
+    """A regular payment as the engine sees it (the saved row is ``models.Contribution``)."""
+
+    amount: Decimal                  # base currency, each payment
+    frequency: Frequency
+    start: date
+    end: date | None = None
+    into_cash_rate: Decimal | None = None   # set when paid into a savings account (its rate)
+    label: str | None = None
+
+
+@dataclass(frozen=True)
+class ProjectionPoint:
+    month: date            # first of the month
+    worst: Decimal         # whole dollars, base currency
+    base: Decimal
+    best: Decimal
+    put_in: Decimal        # starting value plus contributions so far
+
+
+@dataclass(frozen=True)
+class Projection:
+    points: list[ProjectionPoint]   # month 0 (today) to the horizon
+    start_value: Decimal
+    contributed: Decimal            # total contributions over the horizon
+    expected_return: Decimal        # combined return of the invested part
+    volatility: Decimal             # combined volatility
+    chance_of_target: Decimal | None
+    assets: list[Asset]
+    notes: list[str]
+
+    @property
+    def final(self) -> ProjectionPoint:
+        return self.points[-1]
+
+    @property
+    def growth(self) -> Decimal:
+        """Base case at the end minus everything put in."""
+        return self.final.base - self.final.put_in
+
+
+def _month(d: date, add: int = 0) -> date:
+    n = d.year * 12 + d.month - 1 + add
+    return date(n // 12, n % 12 + 1, 1)
+
+
+def _months_between(a: date, b: date) -> int:
+    return (b.year - a.year) * 12 + b.month - a.month
+
+
+def paid_in_month(c: ContributionFlow, month: date) -> Decimal:
+    """What a contribution pays in the calendar month starting ``month``."""
+    if month < _month(c.start) or (c.end is not None and month > _month(c.end)):
+        return D(0)
+    if c.frequency in PER_MONTH:
+        return c.amount * PER_MONTH[c.frequency]
+    since = _months_between(_month(c.start), month)
+    step = 3 if c.frequency is Frequency.QUARTERLY else 12
+    return c.amount if since % step == 0 else D(0)
+
+
+def project(assets: list[Asset], contributions: list[ContributionFlow], *, today: date,
+            years: int, target: Decimal | None = None, target_date: date | None = None,
+            real: bool = False, paths: int = PATHS, seed: int = SEED) -> Projection:
+    """Worst, base and best values month by month: ``paths`` simulated monthly paths for the
+    invested part, savings at their own rates, contributions at the end of each month."""
+    months = years * 12
+    start = _month(today)
+    mu, sigma = combine(assets)
+    invested0 = float(sum((a.value for a in assets if not a.is_cash), D(0)))
+    savings = [(float(a.value), float(a.expected_return)) for a in assets if a.is_cash]
+
+    rng = np.random.default_rng(seed)
+    mean = math.log(1 + float(mu)) / 12
+    if sigma > 0:
+        steps = rng.normal(mean, float(sigma) / math.sqrt(12), size=(paths, months))
+    else:
+        steps = np.full((paths, months), mean)
+    growth = np.exp(steps)
+
+    invested = np.empty((paths, months + 1))
+    invested[:, 0] = invested0
+    cash_total = np.empty(months + 1)
+    cash_total[0] = sum(v for v, _ in savings)
+    cash_balances = [v for v, _ in savings]
+    into_cash: dict[float, float] = {}       # rate -> balance of contributions into savings
+    put_in = np.empty(months + 1)
+    put_in[0] = invested0 + cash_total[0]
+    for k in range(1, months + 1):
+        # A month's growth first, then that month's contributions at its end.
+        cash_balances = [b * (1 + r) ** (1 / 12) for b, (_, r) in
+                         zip(cash_balances, savings, strict=True)]
+        into_cash = {r: b * (1 + r) ** (1 / 12) for r, b in into_cash.items()}
+        to_invest = to_cash = 0.0
+        for c in contributions:
+            paid = float(paid_in_month(c, _month(start, k)))
+            if c.into_cash_rate is not None:
+                rate = float(c.into_cash_rate)
+                into_cash[rate] = into_cash.get(rate, 0.0) + paid
+                to_cash += paid
+            else:
+                to_invest += paid
+        invested[:, k] = invested[:, k - 1] * growth[:, k - 1] + to_invest
+        cash_total[k] = sum(cash_balances) + sum(into_cash.values())
+        put_in[k] = put_in[k - 1] + to_invest + to_cash
+    totals = invested + cash_total
+
+    chance = None
+    if target is not None and target_date is not None:
+        idx = _months_between(start, _month(target_date))
+        if 0 < idx <= months:
+            share = D(str(float(np.mean(totals[:, idx] >= float(target))) * 100))
+            chance = _clamp((share / CHANCE_STEP).quantize(D(1)) * CHANCE_STEP,
+                            CHANCE_MIN, CHANCE_MAX)
+
+    if real:
+        deflator = (1 + float(INFLATION)) ** (np.arange(months + 1) / 12)
+        totals = totals / deflator
+        put_in = put_in / deflator
+    worst, base, best = np.percentile(totals, [WORST_PCT, BASE_PCT, BEST_PCT], axis=0)
+
+    def whole(x: float) -> Decimal:
+        return D(round(float(x)))
+
+    points = [ProjectionPoint(_month(start, k), whole(worst[k]), whole(base[k]), whole(best[k]),
+                              whole(put_in[k])) for k in range(months + 1)]
+    notes = []
+    horizon_end = _month(start, months)
+    for c in contributions:
+        name = c.label or "A regular contribution"
+        if c.end is not None and start < _month(c.end) < horizon_end:
+            notes.append(f"{name} ends in {c.end:%b %Y}.")
+        if _month(c.start) > horizon_end:
+            notes.append(f"{name} starts in {c.start:%b %Y}, after this projection ends.")
+    contributed = whole(put_in[-1] - put_in[0])
+    return Projection(points, whole(put_in[0]), contributed, mu, sigma, chance, list(assets),
+                      notes)
